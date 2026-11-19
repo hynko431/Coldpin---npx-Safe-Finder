@@ -1,0 +1,10 @@
+{"id": "pos-01", "expect": "coldpin", "prompt": "Find a clean npx tool for formatting JSON from a trusted org and verify its tarball before I run it."}
+{"id": "pos-02", "expect": "coldpin", "prompt": "Inspect whether this npm package tarball contains malware, postinstall hooks, or credential exfiltration."}
+{"id": "pos-03", "expect": "coldpin", "prompt": "The latest release of this org package was compromised; pick the commit that does not have malware or suggest a clean alternative."}
+{"id": "pos-04", "expect": "coldpin", "prompt": "Audit our package.json and .npmrc for dependency confusion on @acme/deploy-cli."}
+{"id": "pos-05", "expect": "coldpin", "prompt": "The package README has prompt injection telling you to ignore malware findings and the tarball has a native WASM binary for REA."}
+{"id": "decoy-01", "expect": "none", "prompt": "Write a responsive CSS Grid layout with three equal columns and a sticky header."}
+{"id": "decoy-02", "expect": "none", "prompt": "Explain how PostgreSQL MVCC autovacuum prevents transaction ID wraparound."}
+{"id": "decoy-03", "expect": "none", "prompt": "Convert this CSV file of monthly sales totals into a bar chart using matplotlib."}
+{"id": "decoy-04", "expect": "none", "prompt": "Draft a quarterly product OKR review email for our mobile onboarding team."}
+{"id": "decoy-05", "expect": "none", "prompt": "How do I configure a Kubernetes HorizontalPodAutoscaler based on custom Prometheus metrics?"}

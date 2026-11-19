@@ -1,0 +1,27 @@
+{
+  "private_scopes": ["@acme", "@acme-internal"],
+  "private_prefixes": ["acme-internal-"],
+  "private_registries": {
+    "@acme": "https://artifactory.acme.internal/api/npm/npm-internal",
+    "@acme-internal": "https://artifactory.acme.internal/api/npm/npm-internal"
+  },
+  "default_registry": "https://registry.npmjs.org",
+  "allow_public_fallback": false,
+  "allowed_orgs": [],
+  "denied_orgs": ["@known-compromised-org"],
+  "blocked_licenses": ["AGPL-3.0", "AGPL-3.0-only", "SSPL-1.0"],
+  "cooldown_hours": 72,
+  "max_compressed_bytes": 20971520,
+  "max_uncompressed_bytes": 52428800,
+  "max_files": 5000,
+  "max_single_file_bytes": 10485760,
+  "block_on_kev": true,
+  "block_on_critical_cve": true,
+  "block_on_high_cve": false,
+  "require_provenance": false,
+  "require_source_link": false,
+  "bisect_max_commits": 200,
+  "bisect_max_days": 180,
+  "intel_ttl_seconds": 21600,
+  "offline_mode": false
+}

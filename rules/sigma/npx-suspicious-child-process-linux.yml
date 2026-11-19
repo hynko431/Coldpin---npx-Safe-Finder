@@ -1,0 +1,54 @@
+title: Suspicious Child Process Spawned by npx or npm Lifecycle Script (Linux/macOS)
+id: 9b2c1e4a-3d7f-4a12-8e9b-5c41f2d0a817
+status: experimental
+description: >-
+  Detects node, npm, or npx processes on Linux/macOS developer workstations or CI runners
+  spawning download-and-execute shells (curl/wget piped to sh/bash), reverse shells (/dev/tcp, nc -e),
+  or reading local credential stores (.npmrc, .ssh, .aws) — indicating a bypassed Coldpin gate.
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/007/
+  - https://attack.mitre.org/techniques/T1552/001/
+author: hynko431
+date: 2026-11-19
+tags:
+  - attack.initial_access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.007
+  - attack.credential_access
+  - attack.t1552.001
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_parent:
+    ParentImage|endswith:
+      - '/node'
+      - '/npm'
+      - '/npx'
+      - '/sh'
+      - '/bash'
+  selection_pipe_exec:
+    CommandLine|contains:
+      - '| sh'
+      - '| bash'
+      - '|sh'
+      - '|bash'
+      - '/dev/tcp/'
+      - 'nc -e'
+      - 'mkfifo '
+      - 'base64 -d'
+      - 'base64 --decode'
+  selection_cred_access:
+    CommandLine|contains:
+      - '.npmrc'
+      - '.aws/credentials'
+      - '.ssh/id_'
+      - '.kube/config'
+      - '.git-credentials'
+  condition: selection_parent and (selection_pipe_exec or selection_cred_access)
+falsepositives:
+  - Legitimate CI bootstrap scripts explicitly approved in pipeline allow-lists
+  - Developer scripts invoking local curl checks without piping to a shell
+level: high

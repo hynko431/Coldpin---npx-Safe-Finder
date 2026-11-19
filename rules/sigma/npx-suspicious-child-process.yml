@@ -1,0 +1,49 @@
+title: Suspicious Child Process Spawned by npx or npm Lifecycle Script
+id: 6d4e7a2b-8f1c-4e9a-b7c1-90a2d4f8c102
+status: experimental
+description: >-
+  Detects node, npm, or npx processes spawning encoded PowerShell, download-and-execute shells
+  (curl/wget piped to sh/bash), or credential-file access tools — indicating a developer or CI
+  runner bypassed Coldpin and executed a trojanized npm package lifecycle hook.
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/007/
+author: hynko431
+date: 2026-11-19
+tags:
+  - attack.initial_access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.007
+  - attack.credential_access
+  - attack.t1552.001
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_parent:
+    ParentImage|endswith:
+      - '\node.exe'
+      - '\npm.cmd'
+      - '\npx.cmd'
+      - '\cmd.exe'
+  selection_suspicious_child:
+    CommandLine|contains:
+      - ' -enc '
+      - ' -EncodedCommand '
+      - 'Invoke-Expression'
+      - 'iex('
+      - 'curl '
+      - 'wget '
+      - '.npmrc'
+      - '.aws\credentials'
+      - '.ssh\id_'
+  selection_pipe_exec:
+    CommandLine|contains|all:
+      - 'http'
+      - '|'
+  condition: selection_parent and (selection_suspicious_child or selection_pipe_exec)
+falsepositives:
+  - Legitimate developer build scripts invoking curl for local health checks
+  - Internal installer scripts explicitly approved via security policy
+level: high

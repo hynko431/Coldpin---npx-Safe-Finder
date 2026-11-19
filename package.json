@@ -1,0 +1,45 @@
+{
+  "name": "coldpin",
+  "version": "1.1.0",
+  "description": "Zero-execution npx discovery, static malware triage, tarball-to-source parity, and pre-compromise clean-anchor recovery.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hynko431/Coldpin---npx-Safe-Finder.git"
+  },
+  "homepage": "https://github.com/hynko431/Coldpin---npx-Safe-Finder#readme",
+  "bugs": {
+    "url": "https://github.com/hynko431/Coldpin---npx-Safe-Finder/issues"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "coldpin": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "node --no-warnings ./src/cli.ts",
+    "test": "node --no-warnings --test tests/security-quarantine.test.ts tests/static-triage-and-policy.test.ts tests/e2e-parity-and-bisect.test.ts tests/hardening-and-packaging.test.ts",
+    "lint:skill": "python scripts/lint_skill.py",
+    "verify:hygiene": "python scripts/verify_hygiene.py",
+    "check:stale": "python scripts/staleness_check.py 30",
+    "eval:static": "python scripts/eval_static.py",
+    "audit:self": "python scripts/self_audit_skillspector.py",
+    "bench": "node --no-warnings ./scripts/run_benchmarks.ts",
+    "bench:check": "node --no-warnings ./scripts/run_benchmarks.ts --check",
+    "sign:skill": "node --no-warnings ./scripts/sign_and_verify_skill.ts --sign",
+    "sign:verify": "node --no-warnings ./scripts/sign_and_verify_skill.ts --verify",
+    "pack:plugin": "python scripts/pack_plugin.py --target all --verify --sync-workspace",
+    "verify:all": "npm test && npm run lint:skill && npm run verify:hygiene && npm run check:stale && npm run eval:static && npm run audit:self && npm run bench:check && npm run sign:verify && npm run pack:plugin"
+  },
+  "keywords": [
+    "npx",
+    "npm",
+    "supply-chain-security",
+    "malware-detection",
+    "agent-skill",
+    "sarif",
+    "sbom"
+  ]
+}

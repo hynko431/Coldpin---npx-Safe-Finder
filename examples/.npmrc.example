@@ -1,0 +1,8 @@
+# Example Enterprise .npmrc for Dependency Confusion Isolation (MITRE ATT&CK T1195.001)
+# Bind every internal organization scope explicitly to your private registry.
+# Keep secrets strictly in environment variables (never hardcode raw tokens).
+
+@acme:registry=https://artifactory.acme.internal/api/npm/npm-internal/
+@acme-internal:registry=https://artifactory.acme.internal/api/npm/npm-internal/
+//artifactory.acme.internal/api/npm/npm-internal/:_authToken=${NPM_TOKEN}
+ignore-scripts=true

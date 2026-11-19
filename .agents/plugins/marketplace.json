@@ -1,0 +1,10 @@
+{
+  "name": "coldpin-codex-marketplace",
+  "plugins": [
+    {
+      "name": "coldpin",
+      "path": ".",
+      "manifest": ".codex-plugin/plugin.json"
+    }
+  ]
+}

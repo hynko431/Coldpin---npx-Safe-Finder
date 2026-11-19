@@ -1,0 +1,14 @@
+{
+  "name": "coldpin-marketplace",
+  "owner": {
+    "name": "hynko431"
+  },
+  "plugins": [
+    {
+      "name": "coldpin",
+      "source": ".",
+      "description": "Inspect npx packages cold in memory, verify tarball-to-source parity, and pin verified pre-compromise releases or clean alternatives with zero execution.",
+      "version": "1.1.0"
+    }
+  ]
+}

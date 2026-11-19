@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+schema_version: 1
+skill: coldpin
+role: specialist
+workflows:
+  discover:
+    cli_verb: discover
+    input: PackageDiscoveryRequest
+    output: DiscoveryCardList
+  inspect:
+    cli_verb: inspect
+    input: PackageArtifactRequest
+    output: PackageInspectionReport
+  resolve_anchor:
+    cli_verb: resolve-anchor
+    input: CompromisedPackageRef
+    output: SafeAnchorDecision
+  verify_confusion:
+    cli_verb: verify-confusion
+    input: WorkspaceManifestRef
+    output: ConfusionReport
+  audit_verify:
+    cli_verb: audit-verify
+    input: AuditLogPathRef
+    output: AuditVerificationResult
+input_artifacts:
+  - PackageDiscoveryRequest
+  - PackageArtifactRequest
+  - CompromisedPackageRef
+  - WorkspaceManifestRef
+  - AuditLogPathRef
+  - PolicyConfig
+output_artifacts:
+  - DiscoveryCardList
+  - PackageInspectionReport
+  - SafeAnchorDecision
+  - ConfusionReport
+  - AuditVerificationResult
+  - Sarif210Report
+  - CycloneDx15Sbom
+required_fields:
+  PackageInspectionReport:
+    - schema_version
+    - title
+    - info
+    - verdict
+    - recommended_action
+    - pinned_execution
+    - evidence
+    - iocs
+    - host_capabilities
+  SafeAnchorDecision:
+    - schema_version
+    - package_name
+    - compromised_latest
+    - recommended_action
+    - alternatives
+    - inspected_commits
+    - evidence
+    - unknowns
+statuses:
+  - VERIFIED_CLEAN_WITHIN_SCOPE
+  - QUARANTINE_SUSPICIOUS
+  - MALICIOUS_INDICATORS_FOUND
+  - UNVERIFIABLE_UNKNOWN
+exit_codes:
+  0: VERIFIED_CLEAN_WITHIN_SCOPE or verification passed
+  2: QUARANTINE_SUSPICIOUS or UNVERIFIABLE_UNKNOWN
+  3: MALICIOUS_INDICATORS_FOUND or policy/confusion/audit failure
+  1: CLI usage or unexpected runtime error
+gates:
+  - private scopes and private prefixes route exclusively to private registries before any public network call
+  - zero untrusted lifecycle scripts or package binaries execute during inspection
+  - 4-state verdict and pinned command are computed deterministically in TypeScript outside LLM prompt context
+  - extracted URLs and IPs are defanged (hxxp://, [.]) with TLP markings before display
+  - rollback anchor requires a verified npm tarball passing OSV/KEV/CVE policy or pivots to SWITCH_TO_ALTERNATIVE
+  - local workspace package-lock.json matches against MALICIOUS_INDICATORS_FOUND immediately emit containment steps
+fail_closed_when:
+  - tarball SHA-512 differs from registry dist.integrity
+  - archive contains path traversal, symlinks, hardlinks, devices, duplicate entries, NTFS ADS, or Windows reserved names
+  - decompression stream or file count exceeds policy hard caps
+  - private scope has no private registry configured or query scope is 1 edit from a private scope
+  - compiled native/WASM artifacts or obfuscated JS remain uninspected by REA
+  - offline mode skips live threat intelligence without a fresh cached record
+handoffs:
+  - rea (when pre-registered as MCP or installed on PATH) for obfuscated JS, native .node, WASM, ELF/PE/Mach-O, or version diffs
+  - cybersecurity-engineer and cybersec-playbooks for incident response when local_workspace_compromised is triggered

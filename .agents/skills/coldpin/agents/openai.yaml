@@ -1,0 +1,6 @@
+interface:
+  display_name: "Coldpin"
+  short_description: "Inspect npx packages cold in memory and pin clean releases"
+  icon_small: "./assets/icon.svg"
+  icon_large: "./assets/icon.svg"
+  brand_color: "#0F766E"
