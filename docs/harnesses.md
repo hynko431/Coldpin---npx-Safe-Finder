@@ -6,7 +6,7 @@
 
 | Harness | Manifest | Skill / MCP Entrypoint | Install / Sync Command | Verification Status |
 |---|---|---|---|---|
-| **Antigravity (CLI / Workspace / App / IDEs)** | `plugin.json`, `mcp_config.json` | `skills/coldpin/` (repo & bundle) + `.agents/skills/coldpin/` (workspace mirror) + `${PLUGIN_ROOT}/lib/mcp.mjs` (`COLDPIN_CACHE_DIR=${PLUGIN_DATA}`) | `agy plugin install https://github.com/hynko431/Coldpin-npx-Safe-Finder` or `python scripts/pack_plugin.py --target antigravity --verify --sync-workspace` | Live `agy plugin validate --strict` (`skills: 1`, `mcpServers: 1`, `0` findings) + reproducible bundle verified locally |
+| **Antigravity (CLI / Workspace / App / IDEs)** | `plugin.json`, `mcp_config.json` | `skills/coldpin/` (repo & bundle) + `.agents/skills/coldpin/` (workspace mirror) + `${PLUGIN_ROOT}/lib/mcp.mjs` (`COLDPIN_CACHE_DIR=${PLUGIN_DATA}`) | Extract `dist/coldpin-antigravity.zip` → `agy plugin install <dir>` or `python scripts/pack_plugin.py --target antigravity --verify --sync-workspace` | Live `agy plugin validate --strict` (`skills: 1`, `mcpServers: 1`, `0` findings) + live `agy plugin install` (`enabled, 1.4.0`) verified locally |
 | **Claude Code** | `.claude-plugin/plugin.json` (inline `mcpServers`), `.claude-plugin/marketplace.json` | `skills/coldpin/` + `${CLAUDE_PLUGIN_ROOT}/lib/mcp.mjs` | `python scripts/pack_plugin.py --target claude --verify` | Manifest schema + reproducible archive verified; live Claude Code host trace not executed here |
 | **Codex CLI / ChatGPT Desktop** | `.codex-plugin/plugin.json`, `.agents/plugins/marketplace.json` | `skills/coldpin/` | `python scripts/pack_plugin.py --target openai --verify` | Manifest schema + reproducible archive verified; live Codex host trace not executed here |
 | **Official MCP Registry / npm / Cursor** | `server.json` (`2025-12-11`), `package.json` (`mcpName`) | `npx --ignore-scripts coldpin@1.4.0 mcp` (`lib/mcp.mjs`) | `npm install -g coldpin` or `npx --ignore-scripts coldpin@1.4.0 mcp` | Schema parity, `node_modules` execution smoke test, and JSON-RPC `stdio` MCP suite verified locally on Node `v24.1.0` |
@@ -14,13 +14,20 @@
 
 ## Antigravity App and Antigravity for IDEs
 
-For direct installation via the Antigravity CLI, run `agy plugin install https://github.com/hynko431/Coldpin-npx-Safe-Finder`. For workspace-scoped discovery inside this repository, run:
+Build the clean allowlisted bundle with `python scripts/pack_plugin.py --target antigravity --verify` (or download `coldpin-antigravity.zip` + `SHA256SUMS.txt` from [GitHub Releases](https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases)), extract it to a clean directory (without `.git/`), and install via the Antigravity CLI:
+
+```sh
+python -m zipfile -e dist/coldpin-antigravity.zip ./coldpin-antigravity
+agy plugin install ./coldpin-antigravity
+```
+
+For workspace-scoped discovery inside this repository, run:
 
 ```sh
 python scripts/pack_plugin.py --verify --sync-workspace
 ```
 
-For machine-global installation without an external installer, build `dist/coldpin-antigravity.zip` locally or download the checksum-verified release archive + `SHA256SUMS.txt` from [GitHub Releases](https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases), extract it into `~/.gemini/config/plugins/coldpin/` (remove any prior version first so stale files do not linger), then reload the window and verify `coldpin` appears in the skill/plugin list.
+For manual installation without the CLI, extract `coldpin-antigravity.zip` into `~/.gemini/config/plugins/coldpin/` (remove any prior version first so stale files do not linger), then reload the window and verify `coldpin` appears in `agy plugin list`.
 
 ## Manifest Ownership & Drift Prevention
 

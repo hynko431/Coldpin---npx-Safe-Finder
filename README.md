@@ -32,12 +32,14 @@ node --no-warnings lib/mcp.mjs        # Start local stdio MCP server (or: coldpi
 
 Or install via npm (`npx --ignore-scripts coldpin@1.4.0 mcp`) or download a checksum-verified host bundle (`coldpin-{antigravity,claude,openai}.zip` + `SHA256SUMS.txt`) from [GitHub Releases](https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases).
 
-### Antigravity (Direct GitHub Install / Workspace / App / IDEs)
+### Antigravity (CLI / Workspace / App / IDEs)
 
-Install directly with the Antigravity CLI (loads `skills/coldpin/` and `mcp_config.json` with `${PLUGIN_DATA}` cache isolation):
+Build (or download from [GitHub Releases](https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases)) the clean allowlisted Antigravity bundle, extract it to a directory, and install with the Antigravity CLI (loads `skills/coldpin/` and `mcp_config.json` with `${PLUGIN_DATA}` cache isolation):
 
 ```sh
-agy plugin install https://github.com/hynko431/Coldpin-npx-Safe-Finder
+python scripts/pack_plugin.py --target antigravity --verify
+python -m zipfile -e dist/coldpin-antigravity.zip ./coldpin-antigravity
+agy plugin install ./coldpin-antigravity
 ```
 
 For workspace-scoped discovery inside this repository, run `python scripts/pack_plugin.py --verify --sync-workspace` (syncs `.agents/skills/coldpin/`). For manual global installation into `~/.gemini/config/plugins/coldpin/`, see [Harnesses](docs/harnesses.md#antigravity-app-and-antigravity-for-ides).
