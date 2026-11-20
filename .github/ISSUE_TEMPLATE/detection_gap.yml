@@ -1,0 +1,57 @@
+name: Detection Gap or False Positive
+description: Report a defensive static-triage false positive or a non-sensitive synthetic detection gap.
+title: "[detection]: "
+labels: ["detection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Defensive-Only Policy:** Never post live malware URLs, active C2 infrastructure, weaponized exploit payloads, private tokens, or secrets in public issues.
+        If you have found an exploitable security bypass (such as an archive escape, private-scope leak, or prompt-injection bypass), report it privately via [GitHub Private Vulnerability Reporting](https://github.com/hynko431/Coldpin---npx-Safe-Finder/security/advisories/new).
+
+  - type: dropdown
+    id: gap_type
+    attributes:
+      label: Category
+      options:
+        - False Positive on benign package / CLI pattern
+        - False Negative on minimal synthetic static pattern
+        - Tarball-vs-Git parity or archive quarantine edge case
+        - Provenance or policy enforcement edge case
+    validations:
+      required: true
+
+  - type: textarea
+    id: pattern
+    attributes:
+      label: Minimal Synthetic Fixture
+      description: Provide a tiny, sanitized, defensive code snippet or synthetic `package.json`. Defang any placeholder URLs (`hxxp://`, `[.]`).
+      render: javascript
+    validations:
+      required: true
+
+  - type: textarea
+    id: verdict_delta
+    attributes:
+      label: Expected vs. Observed Verdict & Rule Code
+      description: State the expected `TrustVerdict` and rule code (from `rules/triage-rules.json`) versus what `coldpin inspect --json` produced.
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Runtime & Coldpin Version
+      placeholder: "e.g., Coldpin v1.2.0, Node v24.1.0, Linux x64"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: defensive_confirm
+    attributes:
+      label: Defensive-Only & Hygiene Confirmation
+      options:
+        - label: This submission uses minimal synthetic fixtures only and contains no live malware URLs, exploit chains, or real credentials/secrets.
+          required: true
+        - label: I understand exploitable security bypasses belong in GitHub Private Vulnerability Reporting, not public issues.
+          required: true

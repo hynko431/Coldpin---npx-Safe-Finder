@@ -1,0 +1,16 @@
+# Default repository owner
+* @hynko431
+
+# Security-critical inspection, quarantine, and threat-intelligence modules
+/src/quarantine/ @hynko431
+/src/analysis/ @hynko431
+/src/intel/ @hynko431
+
+# Detection-as-Code rules and SOC Sigma detections
+/rules/ @hynko431
+
+# Canonical agent skill instructions, runtime contract, and cryptographic signature
+/skill-src/coldpin/ @hynko431
+
+# CI/CD workflows, release automation, and repository governance
+/.github/ @hynko431

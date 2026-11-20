@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-11-19
-review_by: 2027-02-19
+last_reviewed: 2026-11-20
+review_by: 2027-02-20
 status: current
 owner_lens: fact-ledger
 sources: see rows
@@ -28,4 +28,4 @@ Rule: every volatile regulatory date, standard revision, and external security t
 
 ## Approved URL Host Allow-List (Checked by `scripts/verify_hygiene.py`)
 
-`registry.npmjs.org`, `api.osv.dev`, `json.schemastore.org`, `github.com`, `attack.mitre.org`, `atlas.mitre.org`, `owasp.org`, `cert-in.org.in`, `meity.gov.in`, `eur-lex.europa.eu`, `oasis-open.org`, `cyclonedx.org`, `cisa.gov`, `slsa.dev`, `in-toto.io`, `sigstore.dev`, `www.apache.org`, `artifactory.acme.internal`, `model_signing`.
+`registry.npmjs.org`, `api.osv.dev`, `json.schemastore.org`, `github.com`, `attack.mitre.org`, `atlas.mitre.org`, `owasp.org`, `cert-in.org.in`, `meity.gov.in`, `eur-lex.europa.eu`, `oasis-open.org`, `cyclonedx.org`, `cisa.gov`, `slsa.dev`, `in-toto.io`, `sigstore.dev`, `www.apache.org`, `artifactory.acme.internal`, `model_signing`, `keepachangelog.com`.

@@ -1,5 +1,5 @@
-export const ENGINE_VERSION = "1.1.0";
-export const CACHE_SCHEMA_VERSION = "2";
+export const ENGINE_VERSION = "1.2.0";
+export const CACHE_SCHEMA_VERSION = "3";
 
 export type TrustVerdict =
   | "VERIFIED_CLEAN_WITHIN_SCOPE"
@@ -16,8 +16,17 @@ export type RecommendedAction =
   | "SWITCH_TO_ALTERNATIVE"
   | "BLOCK_NO_SAFE_PATH";
 
+export type ProvenanceStatus =
+  | "none"
+  | "metadata_url_only"
+  | "dsse_leaf_verified_unanchored"
+  | "sigstore_verified"
+  | "verification_failed";
+
 export type ParityTier =
   | "PROVENANCE_ATTESTED"
+  | "PROVENANCE_UNANCHORED_DSSE"
+  | "PROVENANCE_METADATA_UNVERIFIED"
   | "MANIFEST_PARITY_VERIFIED"
   | "COMPILED_DIST_UNATTESTED"
   | "TARBALL_SOURCE_DRIFT"
@@ -156,6 +165,8 @@ export interface ParityResult {
   git_head?: string;
   repository_url?: string;
   provenance_attested: boolean;
+  provenance_status?: ProvenanceStatus;
+  provenance_url?: string;
   observations: Observation[];
   unknowns: string[];
 }
@@ -204,6 +215,8 @@ export interface PackageInspectionReport {
     direct_dependency_count: number;
     parity_tier: ParityTier;
     provenance_attested: boolean;
+    provenance_status: ProvenanceStatus;
+    provenance_url?: string;
   };
   verdict: TrustVerdict;
   recommended_action: RecommendedAction;
@@ -275,6 +288,7 @@ export interface SafeAnchorDecision {
     commit_sha?: string;
     tarball_sha512?: string;
     provenance_attested: boolean;
+    provenance_status?: ProvenanceStatus;
     pinned_execution: PinnedExecutionInfo;
     residual_advisories: AdvisoryRecord[];
   };

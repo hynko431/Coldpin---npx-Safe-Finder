@@ -4,7 +4,7 @@ Living index of checked-in technical specifications for `coldpin` (Coldpin; EGM 
 
 | Document | Status | Author | Last Updated | Scope |
 |---|---|---|---|---|
-| [coldpin.md](coldpin.md) | Approved | hynko431 | 2026-11-19 | Locked v1.1 architecture, zero-dep Node 24 design, 3-tier parity, Split-Plane SQLite DDL, 5-verb CLI & exit codes, post-Goldfish & security hardening resolutions. |
+| [coldpin.md](coldpin.md) | Approved | hynko431 | 2026-11-20 | Locked v1.2 architecture, zero-dep Node 24 design, provenance-aware 3-tier parity, Split-Plane SQLite DDL, 5-verb CLI & exit codes, post-Goldfish & Round 2 security hardening resolutions. |
 
 ## Related Verification & Governance Records
 

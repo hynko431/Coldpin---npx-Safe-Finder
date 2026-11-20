@@ -10,7 +10,7 @@ description: >-
   escalating binary or obfuscated tarballs to REA.
 license: Apache-2.0
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
   author: "hynko431"
   tags:
     - npx
@@ -41,6 +41,7 @@ Inspect `npx` CLI packages cold in memory and pin clean releases without executi
 - Requires **Node.js >= 24.0.0** (`node:sqlite`, `node:zlib`, native TypeScript type-stripping) and `git` (for `resolve-anchor` and local Git parity).
 - Tier-1 static triage inspects JavaScript/TypeScript source, lifecycle scripts, hidden/bidi Unicode, and binary magic bytes in memory. It cannot observe runtime-only C2 payloads; obfuscated bundles and native `.node`/WASM/ELF/PE/Mach-O binaries fail closed as `QUARANTINE_SUSPICIOUS` or `UNVERIFIABLE_UNKNOWN` until escalated to REA (see [rea-integration-playbook.md](references/rea-integration-playbook.md)).
 - Stock `npx` cannot enforce `--integrity <sha512>` or lock floating transitive dependencies at runtime; always preserve the CLI's caveat alongside the verified SHA-512 digest.
+- **npm Provenance Epistemic Boundary:** Registry `dist.attestations.url` metadata alone (`PROVENANCE_METADATA_UNVERIFIED`) and locally checked leaf-cert DSSE bundles (`PROVENANCE_UNANCHORED_DSSE`) are never reported as `provenance_attested: true`; full Sigstore Fulcio CA chain and Rekor transparency-log verification requires an external Sigstore TUF root (`npm audit signatures` / `cosign`).
 
 ## Canonical 5-Verb Workflow
 

@@ -45,18 +45,18 @@ Mitigation: Deterministic 4-state verdict reports explicit observations, inferen
 **Other Properties Related to Output:** [Zero untrusted script execution; defanged IOCs (`hxxp://`, `[.]`); private scopes never query public npmjs.org or api.osv.dev] <br>
 
 ## Evaluation Tasks & Results: <br>
-See [BENCHMARK.md](BENCHMARK.md) for the executed 36-fixture adversarial/benign corpus, 12 perturbation/mutation checks, cold vs. warm Split-Plane SQLite cache measurements, and positive/decoy trigger selection proxy. <br>
+See [BENCHMARK.md](BENCHMARK.md) for the executed 45-fixture adversarial/benign corpus, 16 perturbation/mutation checks, cold vs. warm Split-Plane SQLite cache measurements, and positive/decoy trigger selection proxy. <br>
 
 | Dimension | Tier 1–2 Measured (Local Deterministic) | Tier 3 Live Multi-Agent Sandbox |
 |---|---:|---:|
-| Security (Adversarial Recall) | 100.0% (20/20 fixtures) | N/A (not run offline) |
-| Security (False-Positive Rate) | 0.0% (0/16 benign CLIs) | N/A (not run offline) |
-| Correctness (Mutation Proofs) | 100.0% (12/12 regressions caught) | N/A (not run offline) |
+| Security (Adversarial Recall) | 100.0% (26/26 fixtures) | N/A (not run offline) |
+| Security (False-Positive Rate) | 0.0% (0/19 benign CLIs) | N/A (not run offline) |
+| Correctness (Mutation Proofs) | 100.0% (16/16 regressions caught) | N/A (not run offline) |
 | Discoverability (Trigger + Decoys) | 100.0% (5/5 positive, 5/5 decoys avoided) | N/A (not run offline) |
 | Skill Self-Audit (SkillSpector-class) | APPROVE (0 blocking findings) | N/A (not run offline) |
 
 ## Skill Version(s): <br>
-1.1.0 (source: `SKILL.md` frontmatter) <br>
+1.2.0 (source: `SKILL.md` frontmatter) <br>
 
 ## Ethical Considerations & Security Reporting: <br>
 This skill is strictly for defensive software supply-chain security and authorized inspection. Never detonate suspected malware outside an isolated lab. Engineering guidance, not legal, medical or financial advice; confirm compliance decisions with qualified counsel. <br>

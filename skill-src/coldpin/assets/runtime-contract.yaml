@@ -74,7 +74,7 @@ gates:
   - 4-state verdict and pinned command are computed deterministically in TypeScript outside LLM prompt context
   - extracted URLs and IPs are defanged (hxxp://, [.]) with TLP markings before display
   - rollback anchor requires a verified npm tarball passing OSV/KEV/CVE policy or pivots to SWITCH_TO_ALTERNATIVE
-  - local workspace package-lock.json matches against MALICIOUS_INDICATORS_FOUND immediately emit containment steps
+  - local workspace package-lock.json, pnpm-lock.yaml, or yarn.lock matches against MALICIOUS_INDICATORS_FOUND immediately emit containment steps
 fail_closed_when:
   - tarball SHA-512 differs from registry dist.integrity
   - archive contains path traversal, symlinks, hardlinks, devices, duplicate entries, NTFS ADS, or Windows reserved names
@@ -82,6 +82,8 @@ fail_closed_when:
   - private scope has no private registry configured or query scope is 1 edit from a private scope
   - compiled native/WASM artifacts or obfuscated JS remain uninspected by REA
   - offline mode skips live threat intelligence without a fresh cached record
+  - require_provenance is true without full Sigstore Fulcio CA + Rekor trust-root verification (dist.attestations.url metadata and unanchored leaf DSSE fail closed)
+  - SLSA attestation subject SHA-512, npm PURL package/version identity, or DSSE signature fails verification
 handoffs:
   - rea (when pre-registered as MCP or installed on PATH) for obfuscated JS, native .node, WASM, ELF/PE/Mach-O, or version diffs
   - cybersecurity-engineer and cybersec-playbooks for incident response when local_workspace_compromised is triggered

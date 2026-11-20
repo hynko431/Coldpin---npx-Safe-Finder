@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildFactCacheKey, type SplitPlaneCache } from "../cache/sqlite-store.ts";
+import type { ProvenanceInspectionResult } from "../intel/registry-osv.ts";
 import type {
   AdvisoryRecord,
   CommitAuditSummary,
@@ -12,6 +13,7 @@ import type {
   PackageManifest,
   ParityResult,
   PolicyConfig,
+  ProvenanceStatus,
   SafeAnchorDecision,
   TarEntry,
   TrustVerdict,
@@ -19,6 +21,7 @@ import type {
 import {
   analyzeSourceBlob,
   DANGEROUS_LIFECYCLE_CMD_RE,
+  hasModuleTaintData,
   isSafeNpmBinName,
   isSafeNpmPackageName,
   isSafeNpmVersion,
@@ -216,8 +219,10 @@ function normalizedRecord(rec?: Record<string, string>): string {
 }
 
 /**
- * 3-Tier Provenance-First Tarball-vs-Git Parity Verification:
- * - Gold: PROVENANCE_ATTESTED (npm SLSA/Sigstore attestation linked)
+ * 3-Tier Provenance-Aware Tarball-vs-Git Parity Verification:
+ * - Gold: PROVENANCE_ATTESTED (ONLY when full Sigstore/SLSA cryptographic verification succeeded)
+ * - Unanchored / Metadata-Only: PROVENANCE_UNANCHORED_DSSE or PROVENANCE_METADATA_UNVERIFIED
+ *   (explicitly sets provenance_attested=false and discloses Fulcio/Rekor trust boundaries)
  * - Silver: MANIFEST_PARITY_VERIFIED (package.json scripts/bin/dependencies match gitHead)
  * - Bronze: COMPILED_DIST_UNATTESTED vs TARBALL_SOURCE_DRIFT (handles TypeScript dist/ cleanly!)
  */
@@ -225,6 +230,9 @@ export function verifyTarballVsGitParity(params: {
   tarballManifest: PackageManifest | null;
   tarballEntries: TarEntry[];
   provenanceAttested: boolean;
+  provenanceStatus?: ProvenanceStatus;
+  provenanceUrl?: string;
+  provenanceInspection?: ProvenanceInspectionResult;
   gitHead?: string;
   repositoryUrl?: string;
   localGitDir?: string;
@@ -233,29 +241,87 @@ export function verifyTarballVsGitParity(params: {
   const observations: Observation[] = [];
   const unknowns: string[] = [];
 
-  if (params.provenanceAttested && !params.localGitDir) {
-    return {
-      tier: "PROVENANCE_ATTESTED",
-      git_head: params.gitHead,
-      repository_url: params.repositoryUrl,
-      provenance_attested: true,
-      observations,
-      unknowns,
-    };
-  }
+  const effectiveStatus: ProvenanceStatus =
+    params.provenanceInspection?.status ??
+    params.provenanceStatus ??
+    (params.provenanceAttested ? "sigstore_verified" : params.provenanceUrl ? "metadata_url_only" : "none");
+  const cryptoVerified = effectiveStatus === "sigstore_verified" && params.provenanceAttested;
+  const provUrl = params.provenanceInspection?.provenance_url ?? params.provenanceUrl;
 
-  if (!params.gitHead && !params.localGitDir) {
-    unknowns.push("SOURCE_UNLINKED: no npm provenance attestation and no gitHead/repository linked.");
-    return {
-      tier: "SOURCE_UNLINKED",
-      repository_url: params.repositoryUrl,
-      provenance_attested: false,
-      observations,
-      unknowns,
-    };
+  if (params.provenanceInspection) {
+    observations.push(...params.provenanceInspection.observations);
+    unknowns.push(...params.provenanceInspection.unknowns);
+  } else if (effectiveStatus === "metadata_url_only") {
+    unknowns.push(
+      "PROVENANCE_CRYPTO_UNVERIFIED: registry metadata advertises dist.attestations.url, but Sigstore/SLSA cryptographic verification (Fulcio CA chain + Rekor transparency log) was not performed.",
+    );
+  } else if (effectiveStatus === "dsse_leaf_verified_unanchored") {
+    unknowns.push(
+      "PROVENANCE_TRUST_ROOT_UNVERIFIED: SLSA DSSE signature verified against bundled leaf certificate, but Sigstore Fulcio CA chain and Rekor transparency-log proofs were NOT verified locally.",
+    );
   }
 
   if (!params.localGitDir) {
+    if (effectiveStatus === "verification_failed") {
+      return {
+        tier: "TARBALL_SOURCE_DRIFT",
+        git_head: params.gitHead,
+        repository_url: params.repositoryUrl,
+        provenance_attested: false,
+        provenance_status: "verification_failed",
+        provenance_url: provUrl,
+        observations,
+        unknowns,
+      };
+    }
+    if (cryptoVerified) {
+      return {
+        tier: "PROVENANCE_ATTESTED",
+        git_head: params.gitHead,
+        repository_url: params.repositoryUrl,
+        provenance_attested: true,
+        provenance_status: "sigstore_verified",
+        provenance_url: provUrl,
+        observations,
+        unknowns,
+      };
+    }
+    if (effectiveStatus === "dsse_leaf_verified_unanchored") {
+      return {
+        tier: "PROVENANCE_UNANCHORED_DSSE",
+        git_head: params.gitHead,
+        repository_url: params.repositoryUrl,
+        provenance_attested: false,
+        provenance_status: "dsse_leaf_verified_unanchored",
+        provenance_url: provUrl,
+        observations,
+        unknowns,
+      };
+    }
+    if (effectiveStatus === "metadata_url_only") {
+      return {
+        tier: "PROVENANCE_METADATA_UNVERIFIED",
+        git_head: params.gitHead,
+        repository_url: params.repositoryUrl,
+        provenance_attested: false,
+        provenance_status: "metadata_url_only",
+        provenance_url: provUrl,
+        observations,
+        unknowns,
+      };
+    }
+    if (!params.gitHead) {
+      unknowns.push("SOURCE_UNLINKED: no npm provenance attestation and no gitHead/repository linked.");
+      return {
+        tier: "SOURCE_UNLINKED",
+        repository_url: params.repositoryUrl,
+        provenance_attested: false,
+        provenance_status: effectiveStatus,
+        provenance_url: provUrl,
+        observations,
+        unknowns,
+      };
+    }
     unknowns.push(
       `PARITY_GIT_NOT_FETCHED: gitHead '${params.gitHead}' recorded, but local Git checkout was not supplied for manifest diff.`,
     );
@@ -264,6 +330,8 @@ export function verifyTarballVsGitParity(params: {
       git_head: params.gitHead,
       repository_url: params.repositoryUrl,
       provenance_attested: false,
+      provenance_status: effectiveStatus,
+      provenance_url: provUrl,
       observations,
       unknowns,
     };
@@ -283,6 +351,8 @@ export function verifyTarballVsGitParity(params: {
       git_head: undefined,
       repository_url: params.repositoryUrl,
       provenance_attested: false,
+      provenance_status: effectiveStatus,
+      provenance_url: provUrl,
       observations,
       unknowns,
     };
@@ -290,10 +360,12 @@ export function verifyTarballVsGitParity(params: {
   if (params.subdir && !validateGitSubdir(params.subdir)) {
     unknowns.push(`INVALID_GIT_SUBDIR: rejected unsafe subdir '${sanitizeUntrustedText(params.subdir, 64)}'.`);
     return {
-      tier: "SOURCE_UNLINKED",
+      tier: effectiveStatus === "verification_failed" ? "TARBALL_SOURCE_DRIFT" : "SOURCE_UNLINKED",
       git_head: params.gitHead,
       repository_url: params.repositoryUrl,
       provenance_attested: false,
+      provenance_status: effectiveStatus,
+      provenance_url: provUrl,
       observations,
       unknowns,
     };
@@ -303,10 +375,12 @@ export function verifyTarballVsGitParity(params: {
   if (!gitPkgBuf || !params.tarballManifest) {
     unknowns.push(`GIT_MANIFEST_UNREADABLE: could not read '${ref}:${prefix}package.json' from local Git repo.`);
     return {
-      tier: "SOURCE_UNLINKED",
+      tier: effectiveStatus === "verification_failed" ? "TARBALL_SOURCE_DRIFT" : "SOURCE_UNLINKED",
       git_head: params.gitHead,
       repository_url: params.repositoryUrl,
       provenance_attested: false,
+      provenance_status: effectiveStatus,
+      provenance_url: provUrl,
       observations,
       unknowns,
     };
@@ -318,10 +392,12 @@ export function verifyTarballVsGitParity(params: {
   } catch {
     unknowns.push("GIT_MANIFEST_INVALID_JSON");
     return {
-      tier: "SOURCE_UNLINKED",
+      tier: effectiveStatus === "verification_failed" ? "TARBALL_SOURCE_DRIFT" : "SOURCE_UNLINKED",
       git_head: params.gitHead,
       repository_url: params.repositoryUrl,
       provenance_attested: false,
+      provenance_status: effectiveStatus,
+      provenance_url: provUrl,
       observations,
       unknowns,
     };
@@ -424,44 +500,52 @@ export function verifyTarballVsGitParity(params: {
     }
   }
 
-  if (driftDetected) {
+  if (driftDetected || effectiveStatus === "verification_failed") {
     return {
       tier: "TARBALL_SOURCE_DRIFT",
       git_head: params.gitHead,
       repository_url: params.repositoryUrl,
       provenance_attested: false,
+      provenance_status: effectiveStatus === "verification_failed" ? "verification_failed" : effectiveStatus,
+      provenance_url: provUrl,
       observations,
       unknowns,
     };
   }
 
   if (hasCompiledDistOnly) {
-    if (params.provenanceAttested) {
+    if (cryptoVerified) {
       return {
         tier: "PROVENANCE_ATTESTED",
         git_head: params.gitHead,
         repository_url: params.repositoryUrl,
         provenance_attested: true,
+        provenance_status: "sigstore_verified",
+        provenance_url: provUrl,
         observations,
         unknowns,
       };
     }
-    unknowns.push("COMPILED_DIST_UNATTESTED: compiled build output present in tarball without SLSA provenance; manifest & source files match gitHead.");
+    unknowns.push("COMPILED_DIST_UNATTESTED: compiled build output present in tarball without cryptographically verified SLSA provenance; manifest & source files match gitHead.");
     return {
       tier: "COMPILED_DIST_UNATTESTED",
       git_head: params.gitHead,
       repository_url: params.repositoryUrl,
       provenance_attested: false,
+      provenance_status: effectiveStatus,
+      provenance_url: provUrl,
       observations,
       unknowns,
     };
   }
 
   return {
-    tier: params.provenanceAttested ? "PROVENANCE_ATTESTED" : "MANIFEST_PARITY_VERIFIED",
+    tier: cryptoVerified ? "PROVENANCE_ATTESTED" : "MANIFEST_PARITY_VERIFIED",
     git_head: params.gitHead,
     repository_url: params.repositoryUrl,
-    provenance_attested: params.provenanceAttested,
+    provenance_attested: cryptoVerified,
+    provenance_status: effectiveStatus,
+    provenance_url: provUrl,
     observations,
     unknowns,
   };
@@ -484,6 +568,14 @@ function isAdvisoryPolicyBlocking(advisories: AdvisoryRecord[], policy: PolicyCo
       (policy.block_on_critical_cve && a.severity === "CRITICAL") ||
       (policy.block_on_high_cve && a.severity === "HIGH"),
   );
+}
+
+function isReleaseProvenanceVerified(
+  rel: { provenance_attested: boolean; provenance_status?: ProvenanceStatus } | undefined,
+): boolean {
+  if (!rel?.provenance_attested) return false;
+  const status: ProvenanceStatus = rel.provenance_status ?? "sigstore_verified";
+  return status === "sigstore_verified";
 }
 
 function safePinnedNpxCommand(pkgName: string, version: string | undefined, binName: string): string | null {
@@ -531,7 +623,10 @@ export function walkGitHistoryForCleanAnchor(params: {
   binName?: string;
   policy: PolicyConfig;
   cache?: SplitPlaneCache;
-  releaseTarballByCommit?: Map<string, { version: string; tarball_sha512?: string; provenance_attested: boolean }>;
+  releaseTarballByCommit?: Map<
+    string,
+    { version: string; tarball_sha512?: string; provenance_attested: boolean; provenance_status?: ProvenanceStatus }
+  >;
   residualAdvisoriesByCommit?: Map<string, AdvisoryRecord[]>;
   compromisedVersions?: Set<string>;
   compromisedCommits?: Set<string>;
@@ -778,11 +873,8 @@ export function walkGitHistoryForCleanAnchor(params: {
         commitObs.push(...blobFacts.observations);
         commitInferences.push(...blobFacts.inferences);
         commitUnknowns.push(...blobFacts.unknowns);
-        if (
-          blobFacts.module_taint &&
-          (blobFacts.module_taint.exported_tainted.length > 0 || blobFacts.module_taint.imported_sinks.length > 0)
-        ) {
-          commitModuleTaint.set(filePath, { sha256: blobSha, taint: blobFacts.module_taint });
+        if (hasModuleTaintData(blobFacts.module_taint)) {
+          commitModuleTaint.set(filePath, { sha256: blobSha, taint: blobFacts.module_taint! });
         }
       }
 
@@ -926,11 +1018,47 @@ export function walkGitHistoryForCleanAnchor(params: {
             commit_sha: headSha,
             tarball_sha512: rel?.tarball_sha512,
             provenance_attested: rel?.provenance_attested ?? false,
+            provenance_status: rel?.provenance_status ?? (rel?.provenance_attested ? "sigstore_verified" : "none"),
             pinned_execution: {
               command: null,
               exact_version: rel?.version,
               tarball_sha512: rel?.tarball_sha512,
               caveat: "Latest release blocked by enterprise CVE/KEV/MAL advisory policy; switch to a vetted alternative.",
+            },
+            residual_advisories: headAdvisories,
+          },
+          alternatives: params.alternatives ?? [],
+          inspected_commits,
+          evidence,
+          unknowns,
+        };
+      }
+      const headProvStatus: ProvenanceStatus =
+        rel?.provenance_status ?? (rel?.provenance_attested ? "sigstore_verified" : "none");
+      if (params.policy.require_provenance && !isReleaseProvenanceVerified(rel)) {
+        unknowns.push(
+          `PROVENANCE_REQUIRED_NOT_VERIFIED: enterprise policy requires cryptographically verified Sigstore/SLSA provenance (observed '${headProvStatus}', sigstore_verified=${isReleaseProvenanceVerified(rel)}).`,
+        );
+        return {
+          schema_version: "1",
+          package_name: params.package_name,
+          compromised_latest: {
+            version: rel?.version,
+            commit_sha: headSha,
+            reason: `HEAD commit (${headSha.slice(0, 10)}) lacks cryptographically verified Sigstore/SLSA provenance required by policy.`,
+          },
+          recommended_action: params.alternatives?.length ? "SWITCH_TO_ALTERNATIVE" : "BLOCK_NO_SAFE_PATH",
+          safe_anchor: {
+            version: rel?.version,
+            commit_sha: headSha,
+            tarball_sha512: rel?.tarball_sha512,
+            provenance_attested: false,
+            provenance_status: headProvStatus,
+            pinned_execution: {
+              command: null,
+              exact_version: rel?.version,
+              tarball_sha512: rel?.tarball_sha512,
+              caveat: "Execution command suppressed: require_provenance=true requires full Sigstore Fulcio/Rekor verification.",
             },
             residual_advisories: headAdvisories,
           },
@@ -953,7 +1081,8 @@ export function walkGitHistoryForCleanAnchor(params: {
           version: rel?.version,
           commit_sha: headSha,
           tarball_sha512: rel?.tarball_sha512,
-          provenance_attested: rel?.provenance_attested ?? false,
+          provenance_attested: isReleaseProvenanceVerified(rel),
+          provenance_status: headProvStatus,
           pinned_execution: {
             command: latestCmd,
             exact_version: rel?.version,
@@ -1011,7 +1140,9 @@ export function walkGitHistoryForCleanAnchor(params: {
           version: matchingRelease?.version,
           commit_sha: cleanCandidate.sha,
           tarball_sha512: matchingRelease?.tarball_sha512,
-          provenance_attested: matchingRelease?.provenance_attested ?? false,
+          provenance_attested: isReleaseProvenanceVerified(matchingRelease),
+          provenance_status:
+            matchingRelease?.provenance_status ?? (matchingRelease?.provenance_attested ? "sigstore_verified" : "none"),
           pinned_execution: {
             command: null,
             exact_version: matchingRelease?.version,
@@ -1043,10 +1174,47 @@ export function walkGitHistoryForCleanAnchor(params: {
         safe_anchor: {
           commit_sha: cleanCandidate.sha,
           provenance_attested: false,
+          provenance_status: "none",
           pinned_execution: {
             command: null,
             caveat:
               "Forensic anchor only: no matching verified npm tarball exists. Build in an isolated sandbox or switch to a vetted alternative.",
+          },
+          residual_advisories: residualAdvisories,
+        },
+        alternatives: params.alternatives ?? [],
+        inspected_commits,
+        evidence,
+        unknowns,
+      };
+    }
+
+    const rollbackProvStatus: ProvenanceStatus =
+      matchingRelease.provenance_status ?? (matchingRelease.provenance_attested ? "sigstore_verified" : "none");
+    if (params.policy.require_provenance && !isReleaseProvenanceVerified(matchingRelease)) {
+      unknowns.push(
+        `PROVENANCE_REQUIRED_NOT_VERIFIED: enterprise policy requires cryptographically verified Sigstore/SLSA provenance for rollback release ${matchingRelease.version} (observed '${rollbackProvStatus}', sigstore_verified=false).`,
+      );
+      return {
+        schema_version: "1",
+        package_name: params.package_name,
+        compromised_latest: {
+          commit_sha: headSha,
+          patient_zero_sha: patientZeroSha,
+          reason: `Latest commit compromised; clean release ${matchingRelease.version} lacks cryptographically verified Sigstore/SLSA provenance required by policy.`,
+        },
+        recommended_action: params.alternatives?.length ? "SWITCH_TO_ALTERNATIVE" : "BLOCK_NO_SAFE_PATH",
+        safe_anchor: {
+          version: matchingRelease.version,
+          commit_sha: cleanCandidate.sha,
+          tarball_sha512: matchingRelease.tarball_sha512,
+          provenance_attested: false,
+          provenance_status: rollbackProvStatus,
+          pinned_execution: {
+            command: null,
+            exact_version: matchingRelease.version,
+            tarball_sha512: matchingRelease.tarball_sha512,
+            caveat: "Rollback command suppressed: require_provenance=true requires full Sigstore Fulcio/Rekor verification.",
           },
           residual_advisories: residualAdvisories,
         },
@@ -1071,7 +1239,8 @@ export function walkGitHistoryForCleanAnchor(params: {
         version: matchingRelease.version,
         commit_sha: cleanCandidate.sha,
         tarball_sha512: matchingRelease.tarball_sha512,
-        provenance_attested: matchingRelease.provenance_attested,
+        provenance_attested: isReleaseProvenanceVerified(matchingRelease),
+        provenance_status: rollbackProvStatus,
         pinned_execution: {
           command: rollbackCmd,
           exact_version: matchingRelease.version,

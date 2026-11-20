@@ -17,10 +17,19 @@ import {
   discoverPackages,
   fetchTarballBuffer,
   fetchVersionMetadata,
+  inspectNpmAttestationBundle,
   queryOsvAdvisories,
+  type ProvenanceInspectionResult,
 } from "./intel/registry-osv.ts";
 import { unpackTarballInMemory } from "./quarantine/safe-unpack.ts";
-import { ENGINE_VERSION, type AdvisoryRecord, type ExitCode, type Observation, type TriageResult } from "./types.ts";
+import {
+  ENGINE_VERSION,
+  type AdvisoryRecord,
+  type ExitCode,
+  type Observation,
+  type ProvenanceStatus,
+  type TriageResult,
+} from "./types.ts";
 import {
   assembleInspectionReport,
   formatAnchorMarkdown,
@@ -286,6 +295,11 @@ async function main(): Promise<ExitCode> {
       let categoryTags: string[] = [];
       let publishedAt: string | undefined;
       let provenanceAttested = false;
+      let provenanceStatus: ProvenanceStatus = "none";
+      let provenanceUrl: string | undefined;
+      let provenanceInspection: ProvenanceInspectionResult | undefined;
+      let registryAuthToken: string | undefined;
+      let registryAllowedOrigin: string | undefined;
       let gitHead: string | undefined;
       let repoUrl: string | undefined;
       let binNames: string[] = [];
@@ -338,6 +352,8 @@ async function main(): Promise<ExitCode> {
         categoryTags = meta.keywords;
         publishedAt = meta.published_at;
         provenanceAttested = meta.provenance_attested;
+        provenanceStatus = meta.provenance_status;
+        provenanceUrl = meta.provenance_url;
         gitHead = meta.git_head;
         repoUrl = meta.repository_url;
         expectedIntegrity = meta.integrity;
@@ -388,6 +404,8 @@ async function main(): Promise<ExitCode> {
         } catch {
           allowedAuthOrigin = undefined;
         }
+        registryAuthToken = routing.auth_token;
+        registryAllowedOrigin = allowedAuthOrigin;
         const dl = await fetchTarballBuffer(
           meta.tarball_url,
           policy.max_compressed_bytes,
@@ -471,10 +489,27 @@ async function main(): Promise<ExitCode> {
         }
       }
 
+      if (!localTarballPath && !policy.offline_mode && provenanceUrl) {
+        provenanceInspection = await inspectNpmAttestationBundle({
+          attestationUrl: provenanceUrl,
+          expectedTarballSha512: unpack.tarball_sha512,
+          expectedPackageName: pkgName,
+          expectedPackageVersion: pkgVersion,
+          route: routeKind,
+          authToken: registryAuthToken,
+          allowedAuthOrigin: registryAllowedOrigin,
+        });
+        provenanceStatus = provenanceInspection.status;
+        provenanceAttested = provenanceInspection.provenance_attested;
+      }
+
       const parity = verifyTarballVsGitParity({
         tarballManifest: triage.manifest,
         tarballEntries: unpack.entries,
         provenanceAttested,
+        provenanceStatus,
+        provenanceUrl,
+        provenanceInspection,
         gitHead,
         repositoryUrl: repoUrl,
         localGitDir: localGitDir ? resolve(localGitDir) : undefined,
@@ -544,7 +579,10 @@ async function main(): Promise<ExitCode> {
       const pkgName = targetArg ? parsePkgSpec(targetArg).name : "local-repo";
       let repoTarget = localGitDir ? resolve(localGitDir) : explicitRepoUrl;
       const isLocalDir = Boolean(localGitDir);
-      const releaseMap = new Map<string, { version: string; tarball_sha512?: string; provenance_attested: boolean }>();
+      const releaseMap = new Map<
+        string,
+        { version: string; tarball_sha512?: string; provenance_attested: boolean; provenance_status?: ProvenanceStatus }
+      >();
       const releaseDepsByCommit = new Map<string, { exactDeps: Array<{ name: string; version: string }>; hasFloating: boolean }>();
       const residualAdvisoriesByCommit = new Map<string, AdvisoryRecord[]>();
       const compromisedVersions = new Set<string>();
@@ -582,6 +620,7 @@ async function main(): Promise<ExitCode> {
                 version: v.version,
                 tarball_sha512: v.integrity,
                 provenance_attested: v.provenance_attested,
+                provenance_status: v.provenance_status,
               });
               const exactDeps: Array<{ name: string; version: string }> = [];
               let hasFloating = false;

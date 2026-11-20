@@ -6,7 +6,7 @@
 
 ## Local Inputs and Outputs
 
-- **Inputs read locally:** CLI arguments, workspace `.npmrc` and `.coldpin.policy.json` (or legacy `.npx-guard.policy.json`), local `package.json` / `package-lock.json` (when running `verify-confusion` or workspace compromise checks), local tarballs (`--tarball`), and local Git directories (`--git-dir`).
+- **Inputs read locally:** CLI arguments, workspace `.npmrc` and `.coldpin.policy.json` (or legacy `.npx-guard.policy.json`), local `package.json`, `package-lock.json`, `pnpm-lock.yaml`, and `yarn.lock` (when running `verify-confusion` or workspace compromise checks), local tarballs (`--tarball`), and local Git directories (`--git-dir`).
 - **Local persistence:**
   - Split-Plane SQLite cache (`%LOCALAPPDATA%\coldpin\cache.sqlite` on Windows or `~/.cache/coldpin/cache.sqlite` on POSIX, with temp/in-memory fallback) storing structural static observations and TTL-bounded OSV advisory payloads.
   - Optional local append-only `audit.jsonl` (only written when `--audit-log <file>` is explicitly passed), storing a SHA-256 pseudonymous `actor_id_hash` instead of raw usernames or emails.
@@ -15,7 +15,7 @@
 ## Outbound Network Egress & Private-Scope Isolation
 
 - **Offline mode (`--offline`):** Performs zero outbound network requests and fails closed (`UNVERIFIABLE_UNKNOWN`) when live threat intelligence is unavailable.
-- **Public package inspection (online):** Contacts the configured npm registry (`https://registry.npmjs.org` by default) to retrieve package metadata and tarballs, `https://api.osv.dev` for OSV/OpenSSF `MAL-*` advisories, and the declared Git remote only when `resolve-anchor` is invoked with a remote URL.
+- **Public package inspection (online):** Contacts the configured npm registry (`https://registry.npmjs.org` by default) to retrieve package metadata, tarballs, and declared SLSA attestation bundles (`dist.attestations.url`, suppressed if off-origin for private scopes), `https://api.osv.dev` for OSV/OpenSSF `MAL-*` advisories, and the declared Git remote only when `resolve-anchor` is invoked with a remote URL.
 - **Private-scope non-leakage guarantee:** Any package matching `private_scopes`, `private_prefixes`, or private `.npmrc` scoped registries NEVER queries public `registry.npmjs.org` or `api.osv.dev`. Scopes within 1 edit or adjacent transposition of a configured private scope (`@amce` vs `@acme`) are hard-blocked (`blocked_typo`) before any network request is made.
 - **Secrets handling:** Registry authentication tokens (`_authToken=${ENV_VAR}` in `.npmrc`) are read strictly from process environment variables, sent only over HTTPS to their matching private registry host, and never written to stdout, stderr, SQLite cache, SARIF, SBOM, audit logs, or LLM prompt context.
 

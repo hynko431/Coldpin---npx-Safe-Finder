@@ -1,3 +1,4 @@
+import { createPublicKey, verify as cryptoVerify, X509Certificate } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { SingleFlight, type SplitPlaneCache } from "../cache/sqlite-store.ts";
@@ -14,8 +15,10 @@ import {
   type ConfusionReport,
   type DiscoveryCandidate,
   type DiscoveryCardList,
+  type Observation,
   type PackageManifest,
   type PolicyConfig,
+  type ProvenanceStatus,
   type Severity,
 } from "../types.ts";
 import { sanitizeUntrustedText } from "../analysis/static-triage.ts";
@@ -166,6 +169,8 @@ export interface RegistryVersionMetadata {
   repository_url?: string;
   repository_directory?: string;
   provenance_attested: boolean;
+  provenance_status: ProvenanceStatus;
+  provenance_url?: string;
   published_at?: string;
   created_at?: string;
   license: string;
@@ -189,10 +194,25 @@ export interface PackumentSummary {
     integrity?: string;
     git_head?: string;
     provenance_attested: boolean;
+    provenance_status: ProvenanceStatus;
+    provenance_url?: string;
     dependencies: Record<string, string>;
     optional_dependencies: Record<string, string>;
   }>;
   latest_meta: RegistryVersionMetadata;
+}
+
+export interface ProvenanceInspectionResult {
+  status: ProvenanceStatus;
+  provenance_url?: string;
+  provenance_attested: boolean;
+  predicate_type?: string;
+  builder_id?: string;
+  source_repo?: string;
+  source_commit?: string;
+  has_rekor_tlog_entry?: boolean;
+  observations: Observation[];
+  unknowns: string[];
 }
 
 function encodePkgName(name: string): string {
@@ -238,11 +258,542 @@ function extractBinNames(pkgName: string, rawBin: unknown): string[] {
   return [];
 }
 
-function hasNpmProvenance(versionObj: Record<string, unknown>): boolean {
+function extractProvenanceUrl(versionObj: Record<string, unknown>): string | undefined {
   const dist = versionObj["dist"];
-  if (!dist || typeof dist !== "object") return false;
+  if (!dist || typeof dist !== "object") return undefined;
   const attestations = (dist as Record<string, unknown>)["attestations"];
-  return Boolean(attestations && typeof attestations === "object" && "url" in (attestations as Record<string, unknown>));
+  if (!attestations || typeof attestations !== "object") return undefined;
+  const url = (attestations as Record<string, unknown>)["url"];
+  return typeof url === "string" && url.trim().length > 0 ? url.trim() : undefined;
+}
+
+function sriOrHexToSha512Hex(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("sha512-")) {
+    const buf = Buffer.from(trimmed.slice("sha512-".length), "base64");
+    return buf.length === 64 ? buf.toString("hex").toLowerCase() : null;
+  }
+  if (/^[0-9a-f]{128}$/i.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  return null;
+}
+
+function parseNpmPurl(subjectName: string): { name: string; version?: string } | null {
+  if (!subjectName.startsWith("pkg:npm/")) return null;
+  let rest = subjectName.slice("pkg:npm/".length);
+  const qIdx = rest.indexOf("?");
+  if (qIdx !== -1) rest = rest.slice(0, qIdx);
+  const hIdx = rest.indexOf("#");
+  if (hIdx !== -1) rest = rest.slice(0, hIdx);
+  if (!rest) return null;
+
+  const atIdx = rest.lastIndexOf("@");
+  const rawName = atIdx > 0 ? rest.slice(0, atIdx) : rest;
+  const rawVersion = atIdx > 0 ? rest.slice(atIdx + 1) : undefined;
+  let decodedName: string;
+  try {
+    decodedName = decodeURIComponent(rawName);
+  } catch {
+    decodedName = rawName.replace(/^%40/i, "@").replace(/%2f/gi, "/");
+  }
+  if (!decodedName) return null;
+  let decodedVersion: string | undefined;
+  if (rawVersion && rawVersion.length > 0) {
+    try {
+      decodedVersion = decodeURIComponent(rawVersion);
+    } catch {
+      decodedVersion = rawVersion;
+    }
+  }
+  return { name: decodedName, ...(decodedVersion ? { version: decodedVersion } : {}) };
+}
+
+function dssePae(payloadType: string, payloadBytes: Buffer): Buffer {
+  const ptBuf = Buffer.from(payloadType, "utf8");
+  return Buffer.concat([
+    Buffer.from(`DSSEv1 ${ptBuf.length} `, "utf8"),
+    ptBuf,
+    Buffer.from(` ${payloadBytes.length} `, "utf8"),
+    payloadBytes,
+  ]);
+}
+
+/**
+ * Locally inspects an npm Sigstore/SLSA attestation document against the downloaded tarball SHA-512.
+ * Epistemic boundary:
+ * - Verifies in-toto Statement subject SHA-512 + npm PURL package/version identity binding and verifies
+ *   the DSSE signature against the bundled leaf X.509 certificate (or explicit publicKeyPem).
+ * - NEVER sets `provenance_attested: true` without Sigstore Fulcio CA chain + Rekor TUF root
+ *   verification; returns `dsse_leaf_verified_unanchored` with an explicit trust-root unknown instead.
+ * - Flags tampered subject digests, mismatched package/version PURLs, or invalid DSSE signatures as CRITICAL.
+ */
+export function verifyNpmAttestationPayload(
+  doc: unknown,
+  expectedTarballSha512: string,
+  expectedPackageName?: string,
+  provenanceUrl?: string,
+  expectedPackageVersion?: string,
+): ProvenanceInspectionResult {
+  const observations: Observation[] = [];
+  const unknowns: string[] = [];
+  const expectedHex = sriOrHexToSha512Hex(expectedTarballSha512);
+  if (!expectedHex) {
+    unknowns.push("PROVENANCE_CRYPTO_UNVERIFIED: could not normalize expected tarball SHA-512 for attestation comparison.");
+    return { status: "metadata_url_only", provenance_url: provenanceUrl, provenance_attested: false, observations, unknowns };
+  }
+
+  let slsaBundle: Record<string, unknown> | null = null;
+  let declaredPredicateType: string | undefined;
+
+  if (doc && typeof doc === "object") {
+    const obj = doc as Record<string, unknown>;
+    if (Array.isArray(obj["attestations"])) {
+      for (const item of obj["attestations"]) {
+        if (!item || typeof item !== "object") continue;
+        const rec = item as Record<string, unknown>;
+        const pt = typeof rec["predicateType"] === "string" ? rec["predicateType"] : "";
+        if (pt.startsWith("https://slsa.dev/provenance/") && rec["bundle"] && typeof rec["bundle"] === "object") {
+          slsaBundle = rec["bundle"] as Record<string, unknown>;
+          declaredPredicateType = pt;
+          break;
+        }
+      }
+    } else if (obj["dsseEnvelope"] && typeof obj["dsseEnvelope"] === "object") {
+      slsaBundle = obj;
+    }
+  }
+
+  if (!slsaBundle) {
+    unknowns.push(
+      "PROVENANCE_CRYPTO_UNVERIFIED: registry attestation endpoint returned no SLSA provenance bundle; Sigstore/SLSA provenance is NOT verified.",
+    );
+    return { status: "metadata_url_only", provenance_url: provenanceUrl, provenance_attested: false, observations, unknowns };
+  }
+
+  const envelope = slsaBundle["dsseEnvelope"];
+  if (!envelope || typeof envelope !== "object") {
+    observations.push({
+      code: "PROVENANCE_DSSE_SIGNATURE_INVALID",
+      severity: "CRITICAL",
+      path: "<attestation>",
+      attack_id: "T1195.002",
+      detail: "npm SLSA attestation bundle is missing a valid dsseEnvelope.",
+    });
+    return { status: "verification_failed", provenance_url: provenanceUrl, provenance_attested: false, observations, unknowns };
+  }
+
+  const envObj = envelope as Record<string, unknown>;
+  const payloadType = typeof envObj["payloadType"] === "string" ? envObj["payloadType"] : "";
+  const payloadB64 = typeof envObj["payload"] === "string" ? envObj["payload"] : "";
+  const signatures = Array.isArray(envObj["signatures"]) ? (envObj["signatures"] as Array<Record<string, unknown>>) : [];
+  const sigEntries = signatures
+    .map((s) => (s && typeof s === "object" && typeof s["sig"] === "string" ? String(s["sig"]).trim() : ""))
+    .filter((s) => s.length > 0);
+
+  if (payloadType !== "application/vnd.in-toto+json" || !payloadB64 || sigEntries.length === 0) {
+    observations.push({
+      code: "PROVENANCE_DSSE_SIGNATURE_INVALID",
+      severity: "CRITICAL",
+      path: "<attestation>",
+      attack_id: "T1195.002",
+      detail: `Invalid or incomplete DSSE envelope (payloadType='${sanitizeUntrustedText(payloadType, 64)}').`,
+    });
+    return { status: "verification_failed", provenance_url: provenanceUrl, provenance_attested: false, observations, unknowns };
+  }
+
+  const payloadBytes = Buffer.from(payloadB64, "base64");
+  let statement: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(payloadBytes.toString("utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Statement is not a JSON object");
+    }
+    statement = parsed as Record<string, unknown>;
+  } catch {
+    observations.push({
+      code: "PROVENANCE_DSSE_SIGNATURE_INVALID",
+      severity: "CRITICAL",
+      path: "<attestation>",
+      attack_id: "T1195.002",
+      detail: "Failed to parse base64-encoded in-toto Statement JSON inside DSSE envelope.",
+    });
+    return { status: "verification_failed", provenance_url: provenanceUrl, provenance_attested: false, observations, unknowns };
+  }
+
+  const stmtType = typeof statement["_type"] === "string" ? statement["_type"] : "";
+  const stmtPredicateType = typeof statement["predicateType"] === "string" ? statement["predicateType"] : declaredPredicateType;
+  if (
+    (stmtType !== "https://in-toto.io/Statement/v1" && stmtType !== "https://in-toto.io/Statement/v0.1") ||
+    !stmtPredicateType?.startsWith("https://slsa.dev/provenance/")
+  ) {
+    observations.push({
+      code: "PROVENANCE_DSSE_SIGNATURE_INVALID",
+      severity: "CRITICAL",
+      path: "<attestation>",
+      attack_id: "T1195.002",
+      detail: `Unexpected in-toto statement _type ('${sanitizeUntrustedText(stmtType, 48)}') or predicateType ('${sanitizeUntrustedText(stmtPredicateType ?? "", 64)}').`,
+    });
+    return { status: "verification_failed", provenance_url: provenanceUrl, provenance_attested: false, observations, unknowns };
+  }
+
+  const subjects = Array.isArray(statement["subject"]) ? (statement["subject"] as Array<Record<string, unknown>>) : [];
+  const matchedSubject = subjects.find((s) => {
+    const dig = s?.["digest"];
+    if (!dig || typeof dig !== "object") return false;
+    const sha512 = (dig as Record<string, unknown>)["sha512"];
+    return typeof sha512 === "string" && sha512.toLowerCase() === expectedHex;
+  });
+
+  if (!matchedSubject) {
+    observations.push({
+      code: "PROVENANCE_DIGEST_MISMATCH",
+      severity: "CRITICAL",
+      path: "<attestation>",
+      attack_id: "T1195.002",
+      detail: "SLSA attestation subject SHA-512 does not match the verified tarball digest.",
+    });
+    return {
+      status: "verification_failed",
+      provenance_url: provenanceUrl,
+      provenance_attested: false,
+      predicate_type: stmtPredicateType,
+      observations,
+      unknowns,
+    };
+  }
+
+  if (expectedPackageName) {
+    const rawSubName = typeof matchedSubject["name"] === "string" ? matchedSubject["name"].trim() : "";
+    const parsedPurl = rawSubName ? parseNpmPurl(rawSubName) : null;
+    if (!parsedPurl) {
+      observations.push({
+        code: "PROVENANCE_DIGEST_MISMATCH",
+        severity: "CRITICAL",
+        path: "<attestation>",
+        attack_id: "T1195.002",
+        detail: `SLSA attestation subject name '${sanitizeUntrustedText(rawSubName || "<missing>", 80)}' is not a valid npm PURL for inspected package '${sanitizeUntrustedText(expectedPackageName, 80)}'.`,
+      });
+      return {
+        status: "verification_failed",
+        provenance_url: provenanceUrl,
+        provenance_attested: false,
+        predicate_type: stmtPredicateType,
+        observations,
+        unknowns,
+      };
+    }
+    if (parsedPurl.name.toLowerCase() !== expectedPackageName.toLowerCase()) {
+      observations.push({
+        code: "PROVENANCE_DIGEST_MISMATCH",
+        severity: "CRITICAL",
+        path: "<attestation>",
+        attack_id: "T1195.002",
+        detail: `SLSA attestation subject package '${sanitizeUntrustedText(parsedPurl.name, 80)}' does not match inspected package '${sanitizeUntrustedText(expectedPackageName, 80)}'.`,
+      });
+      return {
+        status: "verification_failed",
+        provenance_url: provenanceUrl,
+        provenance_attested: false,
+        predicate_type: stmtPredicateType,
+        observations,
+        unknowns,
+      };
+    }
+    if (expectedPackageVersion && parsedPurl.version && parsedPurl.version !== expectedPackageVersion) {
+      observations.push({
+        code: "PROVENANCE_DIGEST_MISMATCH",
+        severity: "CRITICAL",
+        path: "<attestation>",
+        attack_id: "T1195.002",
+        detail: `SLSA attestation subject version '${sanitizeUntrustedText(parsedPurl.version, 48)}' does not match inspected version '${sanitizeUntrustedText(expectedPackageVersion, 48)}'.`,
+      });
+      return {
+        status: "verification_failed",
+        provenance_url: provenanceUrl,
+        provenance_attested: false,
+        predicate_type: stmtPredicateType,
+        observations,
+        unknowns,
+      };
+    }
+  }
+
+  // Extract optional SLSA v1 / v0.2 metadata for transparency
+  const pred = (statement["predicate"] && typeof statement["predicate"] === "object"
+    ? (statement["predicate"] as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const runDetails = pred["runDetails"] as Record<string, unknown> | undefined;
+  const builderObj = (runDetails?.["builder"] ?? pred["builder"]) as Record<string, unknown> | undefined;
+  const builderId = typeof builderObj?.["id"] === "string" ? sanitizeUntrustedText(builderObj["id"], 120) : undefined;
+  const buildDef = pred["buildDefinition"] as Record<string, unknown> | undefined;
+  const extParams = buildDef?.["externalParameters"] as Record<string, unknown> | undefined;
+  const workflow = extParams?.["workflow"] as Record<string, unknown> | undefined;
+  const invocation = pred["invocation"] as Record<string, unknown> | undefined;
+  const configSource = invocation?.["configSource"] as Record<string, unknown> | undefined;
+  const sourceRepoRaw =
+    typeof workflow?.["repository"] === "string"
+      ? workflow["repository"]
+      : typeof configSource?.["uri"] === "string"
+        ? configSource["uri"]
+        : undefined;
+  const sourceRepo = sourceRepoRaw ? sanitizeUntrustedText(sourceRepoRaw, 140) : undefined;
+  const resolvedDeps = Array.isArray(buildDef?.["resolvedDependencies"])
+    ? (buildDef["resolvedDependencies"] as Array<Record<string, unknown>>)
+    : [];
+  const firstDepDigest = resolvedDeps[0]?.["digest"] as Record<string, unknown> | undefined;
+  const cfgDigest = configSource?.["digest"] as Record<string, unknown> | undefined;
+  const sourceCommit =
+    typeof firstDepDigest?.["gitCommit"] === "string"
+      ? sanitizeUntrustedText(firstDepDigest["gitCommit"], 48)
+      : typeof firstDepDigest?.["sha1"] === "string"
+        ? sanitizeUntrustedText(firstDepDigest["sha1"], 48)
+        : typeof cfgDigest?.["sha1"] === "string"
+          ? sanitizeUntrustedText(cfgDigest["sha1"], 48)
+          : undefined;
+
+  // Verify DSSE signature against bundled leaf X.509 certificate or public key
+  const vm = (slsaBundle["verificationMaterial"] && typeof slsaBundle["verificationMaterial"] === "object"
+    ? (slsaBundle["verificationMaterial"] as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const hasRekorTlog = Array.isArray(vm["tlogEntries"]) && vm["tlogEntries"].length > 0;
+
+  let leafCertRawB64: string | undefined;
+  const certObj = vm["certificate"] as Record<string, unknown> | undefined;
+  if (typeof certObj?.["rawBytes"] === "string") {
+    leafCertRawB64 = certObj["rawBytes"];
+  } else {
+    const chainObj = vm["x509CertificateChain"] as Record<string, unknown> | undefined;
+    const certs = Array.isArray(chainObj?.["certificates"]) ? (chainObj["certificates"] as Array<Record<string, unknown>>) : [];
+    if (typeof certs[0]?.["rawBytes"] === "string") {
+      leafCertRawB64 = certs[0]["rawBytes"];
+    }
+  }
+  const pubKeyPem = typeof vm["publicKeyPem"] === "string" ? vm["publicKeyPem"] : undefined;
+
+  if (!leafCertRawB64 && !pubKeyPem) {
+    unknowns.push(
+      "PROVENANCE_CRYPTO_UNVERIFIED: SLSA subject SHA-512 matched tarball, but verificationMaterial omitted a certificate/public key; DSSE signature and Sigstore trust root were NOT verified.",
+    );
+    return {
+      status: "metadata_url_only",
+      provenance_url: provenanceUrl,
+      provenance_attested: false,
+      predicate_type: stmtPredicateType,
+      builder_id: builderId,
+      source_repo: sourceRepo,
+      source_commit: sourceCommit,
+      has_rekor_tlog_entry: hasRekorTlog,
+      observations,
+      unknowns,
+    };
+  }
+
+  let sigValid = false;
+  try {
+    const pubKey = leafCertRawB64
+      ? new X509Certificate(Buffer.from(leafCertRawB64, "base64")).publicKey
+      : createPublicKey(pubKeyPem!);
+    const keyType = pubKey.asymmetricKeyType;
+    const curve = pubKey.asymmetricKeyDetails?.namedCurve;
+    const hashAlg =
+      keyType === "ed25519" || keyType === "ed448"
+        ? null
+        : curve === "secp384r1"
+          ? "sha384"
+          : curve === "secp521r1"
+            ? "sha512"
+            : "sha256";
+    const pae = dssePae(payloadType, payloadBytes);
+    for (const sigB64 of sigEntries) {
+      if (cryptoVerify(hashAlg, pae, pubKey, Buffer.from(sigB64, "base64"))) {
+        sigValid = true;
+        break;
+      }
+    }
+  } catch {
+    sigValid = false;
+  }
+
+  if (!sigValid) {
+    observations.push({
+      code: "PROVENANCE_DSSE_SIGNATURE_INVALID",
+      severity: "CRITICAL",
+      path: "<attestation>",
+      attack_id: "T1195.002",
+      detail: "SLSA DSSE envelope signature failed cryptographic verification against the bundled certificate/key.",
+    });
+    return {
+      status: "verification_failed",
+      provenance_url: provenanceUrl,
+      provenance_attested: false,
+      predicate_type: stmtPredicateType,
+      builder_id: builderId,
+      source_repo: sourceRepo,
+      source_commit: sourceCommit,
+      has_rekor_tlog_entry: hasRekorTlog,
+      observations,
+      unknowns,
+    };
+  }
+
+  unknowns.push(
+    "PROVENANCE_TRUST_ROOT_UNVERIFIED: SLSA DSSE signature verified against bundled leaf certificate and subject SHA-512 matched tarball, but Sigstore Fulcio CA chain and Rekor transparency-log proofs were NOT verified locally (no embedded Sigstore TUF trusted_root). Run 'npm audit signatures' or cosign for full cryptographic verification.",
+  );
+  return {
+    status: "dsse_leaf_verified_unanchored",
+    provenance_url: provenanceUrl,
+    provenance_attested: false,
+    predicate_type: stmtPredicateType,
+    builder_id: builderId,
+    source_repo: sourceRepo,
+    source_commit: sourceCommit,
+    has_rekor_tlog_entry: hasRekorTlog,
+    observations,
+    unknowns,
+  };
+}
+
+export async function inspectNpmAttestationBundle(params: {
+  attestationUrl: string;
+  expectedTarballSha512: string;
+  expectedPackageName?: string;
+  expectedPackageVersion?: string;
+  route?: "private" | "public";
+  authToken?: string;
+  allowedAuthOrigin?: string;
+  timeoutMs?: number;
+}): Promise<ProvenanceInspectionResult> {
+  // Enforce private-scope non-leakage: never fetch public npmjs.org or off-registry attestation URLs for private scopes
+  if (params.route === "private") {
+    let attOrigin: string | undefined;
+    try {
+      attOrigin = new URL(params.attestationUrl).origin;
+    } catch {
+      attOrigin = undefined;
+    }
+    if (
+      isPublicNpmRegistryUrl(params.attestationUrl) ||
+      (params.allowedAuthOrigin && attOrigin !== params.allowedAuthOrigin)
+    ) {
+      return {
+        status: "metadata_url_only",
+        provenance_url: params.attestationUrl,
+        provenance_attested: false,
+        observations: [],
+        unknowns: [
+          "PRIVATE_SCOPE_PROVENANCE_FETCH_SUPPRESSED: skipped off-origin/public dist.attestations.url fetch to prevent internal package metadata leakage.",
+        ],
+      };
+    }
+  }
+  const MAX_ATTESTATION_BYTES = 2 * 1024 * 1024;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 10000);
+  try {
+    let allowHttpOrigin: string | undefined;
+    if (params.allowedAuthOrigin && params.allowedAuthOrigin.startsWith("http://")) {
+      allowHttpOrigin = params.allowedAuthOrigin;
+    }
+    const fetched = await fetchWithSafeRedirects({
+      url: params.attestationUrl,
+      headers: { "user-agent": USER_AGENT, accept: "application/json" },
+      authToken: params.authToken,
+      allowedAuthOrigin: params.allowedAuthOrigin,
+      allowPlainHttpOrigin: allowHttpOrigin,
+      signal: controller.signal,
+    });
+    if (!fetched.ok || !fetched.response) {
+      return {
+        status: "metadata_url_only",
+        provenance_url: params.attestationUrl,
+        provenance_attested: false,
+        observations: [],
+        unknowns: [
+          `PROVENANCE_ATTESTATION_FETCH_FAILED: registry metadata advertised dist.attestations.url, but fetching the attestation bundle failed (${fetched.error ?? "network error"}); Sigstore/SLSA provenance is NOT verified.`,
+        ],
+      };
+    }
+    const res = fetched.response;
+    if (!res.ok) {
+      return {
+        status: "metadata_url_only",
+        provenance_url: params.attestationUrl,
+        provenance_attested: false,
+        observations: [],
+        unknowns: [
+          `PROVENANCE_ATTESTATION_FETCH_FAILED: registry metadata advertised dist.attestations.url, but endpoint returned HTTP ${res.status}; Sigstore/SLSA provenance is NOT verified.`,
+        ],
+      };
+    }
+    if (!res.body) {
+      return {
+        status: "metadata_url_only",
+        provenance_url: params.attestationUrl,
+        provenance_attested: false,
+        observations: [],
+        unknowns: [
+          "PROVENANCE_ATTESTATION_FETCH_FAILED: attestation endpoint returned empty body; Sigstore/SLSA provenance is NOT verified.",
+        ],
+      };
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const reader = res.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > MAX_ATTESTATION_BYTES) {
+          await reader.cancel();
+          return {
+            status: "metadata_url_only",
+            provenance_url: params.attestationUrl,
+            provenance_attested: false,
+            observations: [],
+            unknowns: [
+              `PROVENANCE_ATTESTATION_FETCH_FAILED: attestation response exceeded ${MAX_ATTESTATION_BYTES} bytes; Sigstore/SLSA provenance is NOT verified.`,
+            ],
+          };
+        }
+        chunks.push(Buffer.from(value));
+      }
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      return {
+        status: "metadata_url_only",
+        provenance_url: params.attestationUrl,
+        provenance_attested: false,
+        observations: [],
+        unknowns: [
+          "PROVENANCE_ATTESTATION_FETCH_FAILED: attestation endpoint returned malformed JSON; Sigstore/SLSA provenance is NOT verified.",
+        ],
+      };
+    }
+    return verifyNpmAttestationPayload(
+      parsed,
+      params.expectedTarballSha512,
+      params.expectedPackageName,
+      params.attestationUrl,
+      params.expectedPackageVersion,
+    );
+  } catch (err) {
+    return {
+      status: "metadata_url_only",
+      provenance_url: params.attestationUrl,
+      provenance_attested: false,
+      observations: [],
+      unknowns: [
+        `PROVENANCE_ATTESTATION_FETCH_FAILED: ${err instanceof Error ? err.message : String(err)}; Sigstore/SLSA provenance is NOT verified.`,
+      ],
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function fetchJsonWithTimeout<T>(
@@ -376,6 +927,7 @@ export async function fetchVersionMetadata(params: {
     const buildMeta = (ver: string, vObj: Record<string, unknown>): RegistryVersionMetadata => {
       const dist = (vObj["dist"] ?? {}) as Record<string, unknown>;
       const repo = extractRepo(vObj["repository"] ?? doc["repository"]);
+      const provUrl = extractProvenanceUrl(vObj);
       return {
         name: String(vObj["name"] ?? params.package_name),
         version: ver,
@@ -384,7 +936,10 @@ export async function fetchVersionMetadata(params: {
         git_head: typeof vObj["gitHead"] === "string" ? vObj["gitHead"] : undefined,
         repository_url: repo.url,
         repository_directory: repo.directory,
-        provenance_attested: hasNpmProvenance(vObj),
+        // Packument dist.attestations.url alone is unverified metadata, never cryptographic Sigstore attestation
+        provenance_attested: false,
+        provenance_status: provUrl ? "metadata_url_only" : "none",
+        provenance_url: provUrl,
         published_at: timeMap[ver],
         created_at: timeMap["created"],
         license: extractLicense(vObj["license"] ?? doc["license"]),
@@ -417,13 +972,16 @@ export async function fetchVersionMetadata(params: {
       const versionsDesc = Object.entries(versions)
         .map(([ver, vObj]) => {
           const dist = (vObj["dist"] ?? {}) as Record<string, unknown>;
+          const provUrl = extractProvenanceUrl(vObj);
           return {
             version: ver,
             published_at: timeMap[ver],
             tarball_url: String(dist["tarball"] ?? ""),
             integrity: typeof dist["integrity"] === "string" ? dist["integrity"] : undefined,
             git_head: typeof vObj["gitHead"] === "string" ? vObj["gitHead"] : undefined,
-            provenance_attested: hasNpmProvenance(vObj),
+            provenance_attested: false,
+            provenance_status: provUrl ? ("metadata_url_only" as const) : ("none" as const),
+            provenance_url: provUrl,
             dependencies:
               vObj["dependencies"] && typeof vObj["dependencies"] === "object"
                 ? (vObj["dependencies"] as Record<string, string>)
@@ -461,6 +1019,7 @@ export async function fetchVersionMetadata(params: {
     const vObj = single.data;
     const dist = (vObj["dist"] ?? {}) as Record<string, unknown>;
     const repo = extractRepo(vObj["repository"]);
+    const provUrl = extractProvenanceUrl(vObj);
     const meta: RegistryVersionMetadata = {
       name: String(vObj["name"] ?? params.package_name),
       version: String(vObj["version"] ?? params.version),
@@ -469,7 +1028,9 @@ export async function fetchVersionMetadata(params: {
       git_head: typeof vObj["gitHead"] === "string" ? vObj["gitHead"] : undefined,
       repository_url: repo.url,
       repository_directory: repo.directory,
-      provenance_attested: hasNpmProvenance(vObj),
+      provenance_attested: false,
+      provenance_status: provUrl ? "metadata_url_only" : "none",
+      provenance_url: provUrl,
       license: extractLicense(vObj["license"]),
       creator: extractCreator(vObj["author"] ?? vObj["_npmUser"]),
       description: sanitizeUntrustedText(String(vObj["description"] ?? ""), 220),

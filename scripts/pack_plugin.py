@@ -85,6 +85,32 @@ MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 HTML_REF_RE = re.compile(r"""(?:href|src)=["']([^"']+)["']""")
 
 
+def slugify_heading(heading: str) -> str:
+    s = re.sub(r"`([^`]*)`", r"\1", heading)
+    s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)
+    s = s.strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"\s+", "-", s)
+    return s
+
+
+def extract_heading_anchors(text: str) -> set[str]:
+    stripped = re.sub(r"```[\s\S]*?```", "", text)
+    anchors: set[str] = set()
+    counts: dict[str, int] = {}
+    for line in stripped.splitlines():
+        m = re.match(r"^#{1,6}\s+(.*)$", line)
+        if m:
+            base = slugify_heading(m.group(1))
+            if base in counts:
+                counts[base] += 1
+                anchors.add(f"{base}-{counts[base]}")
+            else:
+                counts[base] = 0
+                anchors.add(base)
+    return anchors
+
+
 def collect_target_files(target: str) -> list[tuple[str, Path]]:
     found: dict[str, Path] = {}
     root_resolved = ROOT.resolve()
@@ -152,7 +178,30 @@ def validate_archive_contents(target: str, file_bytes: dict[str, bytes]) -> list
                 if norm_icon not in arc_names:
                     errors.append(f"[{target}] {manifest_name} interface.{icon_key} '{icon_val}' missing from archive")
 
-    # 3. Validate relative Markdown & HTML links inside packaged Markdown docs
+    # 2b. Verify YAML skill metadata references inside archive (openai.yaml icons + test_scenarios.yaml skill_file)
+    openai_yaml = "skills/coldpin/agents/openai.yaml"
+    if openai_yaml in file_bytes:
+        oy_text = file_bytes[openai_yaml].decode("utf-8")
+        for m in re.finditer(r'(?:icon_small|icon_large):\s*["\']?([^"\'\s]+)["\']?', oy_text):
+            rel_icon = posixpath.normpath(posixpath.join("skills/coldpin", m.group(1)))
+            if rel_icon not in arc_names:
+                errors.append(f"[{target}] {openai_yaml}: missing icon '{m.group(1)}' (resolved '{rel_icon}')")
+    scenarios_yaml = "skills/coldpin/test_scenarios.yaml"
+    if scenarios_yaml in file_bytes:
+        sc_text = file_bytes[scenarios_yaml].decode("utf-8")
+        for m in re.finditer(r'skill_file:\s*["\']([^"\']+)["\']', sc_text):
+            sf = posixpath.normpath(m.group(1))
+            if sf not in arc_names:
+                errors.append(f"[{target}] {scenarios_yaml}: missing skill_file '{m.group(1)}'")
+
+    # 3. Validate relative Markdown & HTML links and #heading anchors inside packaged Markdown docs
+    anchor_cache: dict[str, set[str]] = {}
+
+    def get_anchors(name: str) -> set[str]:
+        if name not in anchor_cache:
+            anchor_cache[name] = extract_heading_anchors(file_bytes[name].decode("utf-8"))
+        return anchor_cache[name]
+
     for arc_name, raw in sorted(file_bytes.items()):
         if not arc_name.endswith(".md"):
             continue
@@ -163,9 +212,15 @@ def validate_archive_contents(target: str, file_bytes: dict[str, bytes]) -> list
         refs = [m.group(1).strip() for m in MD_LINK_RE.finditer(stripped)]
         refs.extend(m.group(1).strip() for m in HTML_REF_RE.finditer(stripped))
         for ref in refs:
-            if not ref or ref.startswith(("http://", "https://", "mailto:", "#", "<")):
+            if not ref or ref.startswith(("http://", "https://", "mailto:", "<")):
                 continue
-            target_part = ref.split("#", 1)[0].split("?", 1)[0].strip()
+            if ref.startswith("#"):
+                frag = ref[1:].strip().lower()
+                if frag and frag not in get_anchors(arc_name):
+                    errors.append(f"[{target}] {arc_name}: broken packaged in-page anchor '{ref}'")
+                continue
+            path_part, _, frag_part = ref.partition("#")
+            target_part = path_part.split("?", 1)[0].strip()
             if not target_part:
                 continue
             resolved = posixpath.normpath(posixpath.join(base_dir, target_part)) if base_dir else posixpath.normpath(target_part)
@@ -174,6 +229,11 @@ def validate_archive_contents(target: str, file_bytes: dict[str, bytes]) -> list
                 continue
             if resolved not in arc_names and not any(n.startswith(resolved + "/") for n in arc_names):
                 errors.append(f"[{target}] {arc_name}: broken packaged relative link '{ref}' (resolved '{resolved}')")
+                continue
+            frag = frag_part.strip().lower()
+            if frag and resolved in file_bytes and resolved.endswith(".md"):
+                if frag not in get_anchors(resolved):
+                    errors.append(f"[{target}] {arc_name}: broken packaged cross-file anchor '{ref}' (resolved '{resolved}#{frag}')")
 
     return errors
 

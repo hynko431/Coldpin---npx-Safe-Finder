@@ -298,6 +298,15 @@ def scan_repo() -> list[Finding]:
     return findings
 
 
+def read_tool_version() -> str:
+    manifest = ROOT / "plugin.json"
+    if manifest.exists():
+        ver = json.loads(manifest.read_text(encoding="utf-8")).get("version")
+        if isinstance(ver, str) and ver.strip():
+            return ver.strip()
+    return "0.0.0"
+
+
 def emit_sarif(findings: list[Finding], dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     rules = {}
@@ -314,7 +323,7 @@ def emit_sarif(findings: list[Finding], dest: Path) -> None:
                 "tool": {
                     "driver": {
                         "name": "coldpin-skillspector-self-audit",
-                        "version": "1.1.0",
+                        "version": read_tool_version(),
                         "rules": list(rules.values()),
                     }
                 },
@@ -332,7 +341,7 @@ def emit_sarif(findings: list[Finding], dest: Path) -> None:
             }
         ],
     }
-    dest.write_text(json.dumps(sarif, indent=2) + "\n", encoding="utf-8")
+    dest.write_text(json.dumps(sarif, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
 def emit_triage_report(findings: list[Finding], dest: Path) -> tuple[str, int]:
@@ -382,7 +391,7 @@ Every observed sensitive call site (`src/intel/registry-osv.ts` HTTPS registry/O
 2. Never add automatic command-approval hooks to `plugin.json`; require explicit human confirmation before executing any emitted `npx` command.
 3. Re-run `npm run audit:self` and inspect `dist/skillspector-self-audit.sarif` on every PR and release.
 """
-    dest.write_text(md, encoding="utf-8")
+    dest.write_text(md, encoding="utf-8", newline="\n")
     return verdict, score
 
 

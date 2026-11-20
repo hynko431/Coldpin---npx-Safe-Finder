@@ -20,9 +20,9 @@ Deterministic SkillSpector-class static scanning (`--no-llm` equivalent, with ze
 ### Key Evidence
 | Rule | Severity | Location | Review judgment |
 |---|---|---|---|
-| `SS-03-BOUNDED-EXEC` | `LOW` | `src/analysis/parity-and-bisect.ts:140` | Acceptable: required for Git parity/bisect or --version probe; never executes untrusted package scripts. |
+| `SS-03-BOUNDED-EXEC` | `LOW` | `src/analysis/parity-and-bisect.ts:143` | Acceptable: required for Git parity/bisect or --version probe; never executes untrusted package scripts. |
 | `SS-03-BOUNDED-EXEC` | `LOW` | `src/config/policy.ts:409` | Acceptable: required for Git parity/bisect or --version probe; never executes untrusted package scripts. |
-| `SS-09-BOUNDED-NETWORK` | `LOW` | `src/intel/registry-osv.ts:138` | Acceptable: documented core capability, blocked for private scopes and --offline. |
+| `SS-09-BOUNDED-NETWORK` | `LOW` | `src/intel/registry-osv.ts:141` | Acceptable: documented core capability, blocked for private scopes and --offline. |
 
 ### Diagnosis
 Every observed sensitive call site (`src/intel/registry-osv.ts` HTTPS registry/OSV fetch, `src/analysis/parity-and-bisect.ts` hardened read-only `git`, and `src/config/policy.ts` read-only `git`/`rea` `--version` probe) was located dynamically by line number, verified to disable shell interpolation and Git config hooks, and remains controllable via `--offline` and `.coldpin.policy.json`. External `skillspector` CLI binary was not installed on `PATH` on this host, so this report reflects the repo's deterministic SkillSpector-equivalent static checker plus manual source review.

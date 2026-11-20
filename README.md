@@ -24,8 +24,12 @@ Choose your coding agent or run the CLI standalone. Install the complete bundle 
 ### Standalone CLI (Node.js `>= 24.0.0`, zero `npm install`)
 
 ```sh
+git clone https://github.com/hynko431/Coldpin---npx-Safe-Finder.git
+cd Coldpin---npx-Safe-Finder
 node --no-warnings src/cli.ts --help
 ```
+
+Or download a checksum-verified host bundle (`coldpin-{antigravity,claude,openai}.zip` + `SHA256SUMS.txt`) from [GitHub Releases](https://github.com/hynko431/Coldpin---npx-Safe-Finder/releases).
 
 ### Antigravity (Workspace / App / IDEs)
 
@@ -116,8 +120,8 @@ Static triage does not replace runtime isolation or human judgment. See [FAQ](do
 - [Privacy & data handling](docs/privacy.md): exact network egress, private-scope non-leakage, and credential boundaries.
 - [FAQ](docs/faq.md): trade-offs, false-positive controls, stock `npx` limits, and REA optionality.
 - [Design specification](docs/designs/coldpin.md) & [Design sitemap](docs/designs/SITEMAP.md): locked architecture after Phase 0 Goldfish review.
-- [Testing & verification](TESTING.md): unit, security, mutation, hygiene, SkillSpector self-audit, and reproducible build gates.
-- [Benchmarks](skill-src/coldpin/BENCHMARK.md) & [Skill Card](skill-src/coldpin/skill-card.md): real executed Tier 1–2 measurements (36-fixture corpus, 12 mutation proofs) and honest Tier 3 status.
+- [Testing & verification](TESTING.md): `27/27` deterministic tests, 9 automated verification gates, cross-platform CI matrix, SkillSpector self-audit, and reproducible build gates.
+- [Benchmarks](skill-src/coldpin/BENCHMARK.md) & [Skill Card](skill-src/coldpin/skill-card.md): real executed Tier 1–2 measurements (`45`-fixture corpus, `16` mutation proofs) and honest Tier 3 status.
 - [Fact Ledger](docs/fact-ledger.md), [Maintenance Cadence](MAINTENANCE.md), & [Changelog](CHANGELOG.md).
 
 ## Contribute & Security

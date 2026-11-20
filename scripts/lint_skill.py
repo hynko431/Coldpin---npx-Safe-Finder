@@ -45,6 +45,17 @@ MD_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 BINARY_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg", ".sig", ".zip", ".tgz", ".gz", ".sqlite"})
 
 
+def extract_skill_md_version(frontmatter: str) -> str | None:
+    m = re.search(r'(?m)^\s*version:\s*["\']?([^\s"\']+)["\']?\s*$', frontmatter)
+    return m.group(1) if m else None
+
+
+def extract_skill_card_version(skill_card_text: str) -> str | None:
+    normalized = skill_card_text.replace("\r\n", "\n")
+    m = re.search(r"##\s+Skill Version\(s\):[^\n]*\n\s*([^\s<]+)", normalized)
+    return m.group(1) if m else None
+
+
 def main() -> int:
     errors: list[str] = []
     skill_md = SKILL_DIR / "SKILL.md"
@@ -123,15 +134,33 @@ def main() -> int:
                     errors.append(
                         f"Version drift in .claude-plugin/marketplace.json: {p_entry.get('version')} != {root_ver}"
                     )
+        codex_mkt = ROOT / ".agents" / "plugins" / "marketplace.json"
+        if codex_mkt.exists():
+            cmkt = json.loads(codex_mkt.read_text(encoding="utf-8"))
+            for p_entry in cmkt.get("plugins", []):
+                if p_entry.get("name") != root_m.get("name"):
+                    errors.append(
+                        f"Name drift in .agents/plugins/marketplace.json: {p_entry.get('name')} != {root_m.get('name')}"
+                    )
+                m_rel = p_entry.get("manifest")
+                if isinstance(m_rel, str) and not (ROOT / m_rel).exists():
+                    errors.append(f"Missing manifest referenced in .agents/plugins/marketplace.json: {m_rel}")
         pkg_json = ROOT / "package.json"
         if pkg_json.exists():
             pkg_ver = json.loads(pkg_json.read_text(encoding="utf-8")).get("version")
             if pkg_ver != root_ver:
                 errors.append(f"Version drift in package.json: {pkg_ver} != {root_ver}")
         if fm_match:
-            sm_ver_m = re.search(r'version:\s*["\']?([0-9]+\.[0-9]+\.[0-9]+)', fm_match.group(1))
-            if not sm_ver_m or sm_ver_m.group(1) != root_ver:
-                errors.append(f"Version drift in SKILL.md frontmatter: {sm_ver_m.group(1) if sm_ver_m else None} != {root_ver}")
+            sm_ver = extract_skill_md_version(fm_match.group(1))
+            if sm_ver != root_ver:
+                errors.append(f"Version drift in SKILL.md frontmatter: {sm_ver} != {root_ver}")
+        skill_card = SKILL_DIR / "skill-card.md"
+        if not skill_card.exists():
+            errors.append("Missing skill-src/coldpin/skill-card.md")
+        else:
+            sc_ver = extract_skill_card_version(skill_card.read_text(encoding="utf-8"))
+            if sc_ver != root_ver:
+                errors.append(f"Version drift in skill-src/coldpin/skill-card.md: {sc_ver} != {root_ver}")
         types_ts = ROOT / "src" / "types.ts"
         if types_ts.exists():
             eng_m = re.search(r'ENGINE_VERSION\s*=\s*"([^"]+)"', types_ts.read_text(encoding="utf-8"))

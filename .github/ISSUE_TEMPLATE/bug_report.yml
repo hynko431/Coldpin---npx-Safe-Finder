@@ -1,0 +1,58 @@
+name: Bug Report
+description: Report a deterministic CLI, packaging, or verification defect in Coldpin.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do **not** report security vulnerabilities, live malware URLs, or credentials here. Use [GitHub Private Vulnerability Reporting](https://github.com/hynko431/Coldpin---npx-Safe-Finder/security/advisories/new) for security issues.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Clear, plain-English description of the defect.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction Steps
+      description: Minimal synthetic fixture or redacted CLI command that reproduces the bug.
+      placeholder: |
+        1. Run `node --no-warnings src/cli.ts inspect --tarball ./synthetic.tgz --offline`
+        2. Observe exit code / output...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_vs_observed
+    attributes:
+      label: Expected vs. Observed Behavior
+      description: Include the expected and actual `TrustVerdict`, exit code (`0`/`1`/`2`/`3`), and relevant stderr/JSON snippets.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Output of `node --version`, `git --version`, `python --version`, OS, and Coldpin version or commit SHA.
+      placeholder: |
+        - OS:
+        - Node.js:
+        - Git:
+        - Python:
+        - Coldpin version / commit:
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety_confirm
+    attributes:
+      label: Safety Confirmation
+      options:
+        - label: I confirm this report contains no secrets, `.npmrc` tokens, private internal package names, or live malware URLs.
+          required: true

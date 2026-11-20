@@ -45,7 +45,35 @@ SECRET_RE = re.compile(
 )
 PAYLOAD_RE = re.compile(r"msfvenom|(\\x90){6,}|shellcode\s*=\s*b?[\"']\\x", re.I)
 MDREF_RE = re.compile(r"`([\w./\-]+\.md)`")
+MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+HTML_REF_RE = re.compile(r"""(?:href|src)=["']([^"']+)["']""")
 URL_RE = re.compile(r"https?://([\w.\-]+)")
+
+
+def slugify_heading(heading: str) -> str:
+    s = re.sub(r"`([^`]*)`", r"\1", heading)
+    s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)
+    s = s.strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"\s+", "-", s)
+    return s
+
+
+def extract_heading_anchors(text: str) -> set[str]:
+    stripped = re.sub(r"```[\s\S]*?```", "", text)
+    anchors: set[str] = set()
+    counts: dict[str, int] = {}
+    for line in stripped.splitlines():
+        m = re.match(r"^#{1,6}\s+(.*)$", line)
+        if m:
+            base = slugify_heading(m.group(1))
+            if base in counts:
+                counts[base] += 1
+                anchors.add(f"{base}-{counts[base]}")
+            else:
+                counts[base] = 0
+                anchors.add(base)
+    return anchors
 
 
 def resolve_md_ref(source_file: Path, ref: str) -> bool:
@@ -82,8 +110,10 @@ def main() -> int:
     files_to_check: list[tuple[Path, bool]] = [
         (SKILL_DIR / "SKILL.md", False),
         (SKILL_DIR / "skill-card.md", False),
+        (SKILL_DIR / "BENCHMARK.md", False),
         (SKILL_DIR / "TEST.md", False),
         (ROOT / "README.md", False),
+        (ROOT / "CHANGELOG.md", False),
         (ROOT / "TESTING.md", False),
         (ROOT / "SECURITY.md", False),
         (ROOT / "CONTRIBUTING.md", False),
@@ -95,9 +125,18 @@ def main() -> int:
         (ROOT / "docs" / "privacy.md", False),
         (ROOT / "docs" / "faq.md", False),
         (ROOT / "docs" / "designs" / "coldpin.md", False),
+        (ROOT / "docs" / "designs" / "SITEMAP.md", False),
+        (ROOT / "docs" / "verification" / "skill-inspector-self-audit.md", False),
     ]
     for ref in sorted((SKILL_DIR / "references").glob("*.md")):
         files_to_check.append((ref, True))
+    gh_pr_tpl = ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
+    if gh_pr_tpl.exists():
+        files_to_check.append((gh_pr_tpl, False))
+    gh_issue_dir = ROOT / ".github" / "ISSUE_TEMPLATE"
+    if gh_issue_dir.is_dir():
+        for tpl in sorted(gh_issue_dir.glob("*.yml")):
+            files_to_check.append((tpl, False))
 
     for fpath, require_ref_meta in files_to_check:
         if not fpath.exists():
@@ -123,6 +162,41 @@ def main() -> int:
             ref_str = m.group(1)
             if not resolve_md_ref(fpath, ref_str):
                 errors.append(f"{rel}: unresolved backticked markdown reference `{ref_str}`")
+
+        # Validate all relative Markdown links, HTML href/src asset references, and #heading anchors on disk
+        stripped_code = re.sub(r"```[\s\S]*?```", "", txt)
+        rel_refs = [m.group(1).strip() for m in MD_LINK_RE.finditer(stripped_code)]
+        rel_refs.extend(m.group(1).strip() for m in HTML_REF_RE.finditer(stripped_code))
+        self_anchors: set[str] | None = None
+        for ref in rel_refs:
+            if not ref or ref.startswith(("http://", "https://", "mailto:", "<")):
+                continue
+            if ref.startswith("#"):
+                frag = ref[1:].strip().lower()
+                if frag:
+                    if self_anchors is None:
+                        self_anchors = extract_heading_anchors(txt)
+                    if frag not in self_anchors:
+                        errors.append(f"{rel}: broken in-page heading anchor '{ref}'")
+                continue
+            path_part, _, frag_part = ref.partition("#")
+            target_part = path_part.split("?", 1)[0].strip()
+            if not target_part:
+                continue
+            resolved_target = (fpath.parent / target_part).resolve()
+            try:
+                resolved_target.relative_to(ROOT.resolve())
+            except ValueError:
+                errors.append(f"{rel}: relative link escapes repo root: {ref}")
+                continue
+            if not resolved_target.exists():
+                errors.append(f"{rel}: broken relative link '{ref}'")
+                continue
+            frag = frag_part.strip().lower()
+            if frag and resolved_target.is_file() and resolved_target.suffix.lower() == ".md":
+                target_anchors = extract_heading_anchors(resolved_target.read_text(encoding="utf-8"))
+                if frag not in target_anchors:
+                    errors.append(f"{rel}: broken cross-file heading anchor '{ref}'")
 
         for m in URL_RE.finditer(txt):
             hosts.setdefault(m.group(1).lower(), set()).add(rel)

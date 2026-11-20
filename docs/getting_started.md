@@ -7,6 +7,16 @@
 - **Python `>= 3.11`** (zero external pip packages; used only for skill lint, hygiene, staleness, static eval, SkillSpector self-audit, and reproducible bundle packaging).
 - **Optional Tier-2 Deep Forensics:** A pre-registered REA (`rea-agents`) MCP server or pre-installed `rea` binary on `PATH` when inspecting obfuscated bundles or native `.node`/WASM/ELF/PE/Mach-O artifacts. Never bootstrap REA with `npx -y rea-agents`.
 
+## Setup
+
+Clone the repository directly (no `npm install` step required):
+
+```sh
+git clone https://github.com/hynko431/Coldpin---npx-Safe-Finder.git
+cd Coldpin---npx-Safe-Finder
+node --no-warnings src/cli.ts --help
+```
+
 ## Core Workflow Loop
 
 1. **Configure Enterprise Policy (Optional for Public Use, Required for Private Orgs):**
@@ -42,7 +52,7 @@
 
 ## Full Verification Suite
 
-Run every automated test, lint, hygiene, staleness, benchmark, signature, and reproducible packaging check with one command:
+Run all 9 automated gates (`27/27` tests, skill lint, hygiene, staleness, static eval, SkillSpector self-audit, 45-fixture/16-mutation benchmark verification, DSSE signature verification, and reproducible multi-host packaging) with one command:
 
 ```sh
 npm run verify:all

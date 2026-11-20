@@ -6,17 +6,19 @@
 
 | Version | Supported |
 |---|---|
-| `1.1.x` | Yes (active maintenance) |
-| `1.0.x` | Security fixes via upgrade to `1.1.x` |
+| `1.2.x` | Yes (active maintenance) |
+| `1.1.x` | Security fixes via upgrade to `1.2.x` |
+| `1.0.x` | Security fixes via upgrade to `1.2.x` |
 
 ## Reporting a Vulnerability
 
 If you discover a security bypass in `coldpin` (for example: an archive extraction escape, a static taint evasion, a Git argument injection, a private-scope leak, or a skill prompt-injection bypass):
 
 1. **Do not** open a public issue containing weaponized exploit chains or live malicious package URLs.
-2. Provide a minimal, defensive reproduction (synthetic fixture tarball, redacted CLI command, expected verdict vs. observed verdict).
-3. Include your Node.js version (`node --version`), OS, and commit SHA.
-4. Maintainer triage target: acknowledge within 2 business days `[Typical]`, deliver a regression test + fix before disclosure.
+2. Submit a confidential report via [GitHub Private Vulnerability Reporting](https://github.com/hynko431/Coldpin---npx-Safe-Finder/security/advisories/new).
+3. Provide a minimal, defensive reproduction (synthetic fixture tarball, redacted CLI command, expected verdict vs. observed verdict).
+4. Include your Node.js version (`node --version`), OS, and commit SHA.
+5. Maintainer triage target: acknowledge within 2 business days `[Typical]`, deliver a regression test + fix before disclosure.
 
 ## Hard Security Boundaries of `coldpin`
 

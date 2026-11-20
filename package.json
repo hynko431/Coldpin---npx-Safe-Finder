@@ -1,6 +1,6 @@
 {
   "name": "coldpin",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Zero-execution npx discovery, static malware triage, tarball-to-source parity, and pre-compromise clean-anchor recovery.",
   "type": "module",
   "license": "Apache-2.0",
@@ -18,6 +18,23 @@
   "bin": {
     "coldpin": "./src/cli.ts"
   },
+  "files": [
+    "src/",
+    "rules/",
+    "skill-src/",
+    "assets/",
+    "docs/",
+    "examples/",
+    "plugin.json",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "TESTING.md",
+    "MAINTENANCE.md",
+    "CONTRIBUTING.md",
+    "ACCESSIBILITY.md"
+  ],
   "scripts": {
     "start": "node --no-warnings ./src/cli.ts",
     "test": "node --no-warnings --test tests/security-quarantine.test.ts tests/static-triage-and-policy.test.ts tests/e2e-parity-and-bisect.test.ts tests/hardening-and-packaging.test.ts",

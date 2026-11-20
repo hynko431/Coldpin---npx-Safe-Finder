@@ -1,8 +1,8 @@
-# `coldpin` (Coldpin) — Locked Design Specification (v1.1)
+# `coldpin` (Coldpin) — Locked Design Specification (v1.2)
 
 * **Author:** hynko431
-* **Status:** Approved (Phase 0 Goldfish Blockers Resolved + v1.1 Enterprise Security Hardening)
-* **Date:** 2026-11-19
+* **Status:** Approved (Phase 0 Goldfish Blockers Resolved + v1.2 Round 2 Security & Provenance Hardening)
+* **Date:** 2026-11-20
 
 ---
 
@@ -14,8 +14,9 @@
 
 1. **Runtime & Dependencies:** Pure **Node >= 24.0.0** ESM with native TypeScript type-stripping (`erasableSyntaxOnly`), `node:sqlite`, `node:zlib`, `node:crypto`, `node:module` (`stripTypeScriptTypes`), `node:test`, and `fetch`. Zero external runtime npm dependencies; zero external Python dependencies for governance scripts (`scripts/*.py`).
 2. **In-Memory Zero-Execution Quarantine:** `.tgz` archives are fetched via HTTPS, verified against `dist.integrity` SHA-512, gunzipped through a streaming byte-cap transform (`50 MiB` uncompressed / `20 MiB` compressed / `5,000` files / `10 MiB` max text-file parse cap), and parsed strictly in memory. Zip-Slip (`..`), leading `/` or `\`, Windows drive prefixes (`C:`), NTFS Alternate Data Streams (`:`), Windows reserved device names (`CON`, `NUL`, `AUX`, `PRN`, `COM1-9`, `LPT1-9`), symlinks, hardlinks, FIFOs, duplicate tar entries, and case-insensitive NTFS filename collisions are rejected deterministically.
-3. **3-Tier Tarball-vs-Source Parity:**
-   - **Gold (`PROVENANCE_ATTESTED`):** npm Sigstore/SLSA attestation metadata present and linked to declared repository.
+3. **Provenance-Aware Tarball-vs-Source Parity (Epistemically Honest):**
+   - **Gold (`PROVENANCE_ATTESTED`):** Reserved strictly for cryptographically verified Sigstore/SLSA provenance (`provenance_status: "sigstore_verified"`, `provenance_attested: true`).
+   - **Unanchored / Metadata-Only (`PROVENANCE_UNANCHORED_DSSE` / `PROVENANCE_METADATA_UNVERIFIED`):** Distinguishes advertised `dist.attestations.url` metadata and locally verified leaf-cert DSSE + subject SHA-512 + strict npm PURL package/version checks from full Sigstore Fulcio CA + Rekor TUF root verification (`provenance_attested: false`, explicit trust-boundary unknowns, private-scope off-origin suppression, fails closed under `require_provenance: true` in both `inspect` and `resolve-anchor`; tampered digests, missing/mismatched PURLs, or invalid DSSE signatures emit `CRITICAL` `PROVENANCE_DIGEST_MISMATCH` / `PROVENANCE_DSSE_SIGNATURE_INVALID`).
    - **Silver (`MANIFEST_PARITY_VERIFIED`):** `package.json` `scripts`, `bin`, `dependencies`, and `optionalDependencies` match `gitHead` `package.json`.
    - **Bronze (`COMPILED_DIST_UNATTESTED`):** Compiled `dist/` outputs absent from Git are allowed when build config exists in `gitHead` and no AST taint sinks, obfuscation, or lifecycle-hook drift appear; unexplained script/entrypoint drift triggers `TARBALL_SOURCE_DRIFT`.
 4. **Split-Plane SQLite Cache (`WAL` + `busy_timeout = 5000`):**

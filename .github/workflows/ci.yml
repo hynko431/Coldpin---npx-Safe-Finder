@@ -7,13 +7,18 @@ on:
     branches: [main]
   schedule:
     - cron: '0 6 * * 1' # Weekly staleness & integrity check
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
       security-events: write
@@ -34,8 +39,11 @@ jobs:
       - name: Run full verification pipeline
         run: npm run verify:all
 
+      - name: Verify zero tracked-file or CRLF drift
+        run: git diff --exit-code
+
       - name: Upload SkillSpector self-audit SARIF
-        if: always() && github.event_name != 'pull_request_target'
+        if: always() && matrix.os == 'ubuntu-latest' && github.event_name != 'pull_request_target' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && hashFiles('dist/skillspector-self-audit.sarif') != ''
         uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
         with:
           sarif_file: dist/skillspector-self-audit.sarif

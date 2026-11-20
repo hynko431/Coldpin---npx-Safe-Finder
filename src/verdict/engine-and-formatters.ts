@@ -153,7 +153,11 @@ export function computeDeterministicVerdict(params: {
   }
 
   // 3. UNVERIFIABLE_UNKNOWN (incomplete coverage, cap hit, skipped files, corrupt/missing manifest, native/WASM without REA, OSV unavailable, strict policy missing proof)
-  const strictProvenanceGap = params.policy.require_provenance && !params.parity.provenance_attested;
+  const effectiveProvStatus =
+    params.parity.provenance_status ?? (params.parity.provenance_attested ? "sigstore_verified" : "none");
+  const strictProvenanceGap =
+    params.policy.require_provenance &&
+    (!params.parity.provenance_attested || effectiveProvStatus !== "sigstore_verified");
   const strictSourceGap = params.policy.require_source_link && params.parity.tier === "SOURCE_UNLINKED";
   const incompleteCoverage =
     params.triage.files_skipped > 0 ||
@@ -523,6 +527,9 @@ export function assembleInspectionReport(params: {
     host_capabilities: params.host_capabilities,
   });
 
+  const effectiveProvenanceStatus =
+    params.parity.provenance_status ?? (params.parity.provenance_attested ? "sigstore_verified" : "none");
+
   return {
     schema_version: "1",
     generated_at_utc: new Date().toISOString(),
@@ -544,7 +551,9 @@ export function assembleInspectionReport(params: {
       lifecycle_scripts: lifecycleScripts,
       direct_dependency_count: Object.keys(params.triage.manifest?.dependencies ?? {}).length,
       parity_tier: params.parity.tier,
-      provenance_attested: params.parity.provenance_attested,
+      provenance_attested: params.parity.provenance_attested && effectiveProvenanceStatus === "sigstore_verified",
+      provenance_status: effectiveProvenanceStatus,
+      ...(params.parity.provenance_url ? { provenance_url: params.parity.provenance_url } : {}),
     },
     verdict: verdictRes.verdict,
     recommended_action: verdictRes.recommended_action,
@@ -576,7 +585,7 @@ export function formatInspectionMarkdownCard(report: PackageInspectionReport): s
     `- **Summary:** ${sanitizeUntrustedText(report.info.summary, 200) || "(no description)"}`,
     `- **License:** \`${escapeMarkdownCell(report.info.license, 60)}\` | **Direct Dependencies:** ${report.info.direct_dependency_count}`,
     `- **Binaries:** ${report.info.bin_names.length ? report.info.bin_names.map((b) => `\`${escapeMarkdownCell(b, 64)}\``).join(", ") : "none"} | **Lifecycle Hooks:** ${report.info.lifecycle_scripts.length ? report.info.lifecycle_scripts.map((s) => `\`${escapeMarkdownCell(s, 32)}\``).join(", ") : "none"}`,
-    `- **Tarball Parity Tier:** \`${report.info.parity_tier}\` | **npm Provenance Attested:** \`${report.info.provenance_attested}\``,
+    `- **Tarball Parity Tier:** \`${report.info.parity_tier}\` | **npm Provenance:** \`${report.info.provenance_status}\` (sigstore_verified=\`${report.info.provenance_attested}\`)`,
     `- **Verified SHA-512:** \`${report.pinned_execution.tarball_sha512 ?? "unavailable"}\``,
     "",
     "## Safe Execution Command",
@@ -685,12 +694,15 @@ export function formatAnchorMarkdown(decision: SafeAnchorDecision): string {
     `- **Patient-Zero Commit SHA:** ${decision.compromised_latest.patient_zero_sha ? `\`${decision.compromised_latest.patient_zero_sha}\`` : "`unknown`"}`,
   ];
   if (decision.safe_anchor) {
+    const anchorProvStatus =
+      decision.safe_anchor.provenance_status ?? (decision.safe_anchor.provenance_attested ? "sigstore_verified" : "none");
     lines.push(
       "",
       "## Safe Anchor Candidate",
       `- **Commit SHA:** ${decision.safe_anchor.commit_sha ? `\`${decision.safe_anchor.commit_sha}\`` : "`none`"}`,
       `- **Mapped npm Version:** ${decision.safe_anchor.version ? `\`${escapeMarkdownCell(decision.safe_anchor.version, 48)}\`` : "`none`"}`,
       `- **Verified SHA-512:** ${decision.safe_anchor.tarball_sha512 ? `\`${decision.safe_anchor.tarball_sha512}\`` : "`none`"}`,
+      `- **npm Provenance:** \`${anchorProvStatus}\` (sigstore_verified=\`${decision.safe_anchor.provenance_attested}\`)`,
       `- **Residual Advisories:** ${decision.safe_anchor.residual_advisories.length}`,
       decision.safe_anchor.pinned_execution.command
         ? `\`\`\`bash\n${decision.safe_anchor.pinned_execution.command}\n\`\`\``
@@ -809,6 +821,7 @@ export function formatCycloneDxSbom(
       { name: "coldpin:verdict", value: report.verdict },
       { name: "coldpin:parity-tier", value: report.info.parity_tier },
       { name: "coldpin:provenance-attested", value: String(report.info.provenance_attested) },
+      { name: "coldpin:provenance-status", value: report.info.provenance_status },
       ...(report.title.commit_sha ? [{ name: "coldpin:commit-sha", value: report.title.commit_sha }] : []),
     ],
   };

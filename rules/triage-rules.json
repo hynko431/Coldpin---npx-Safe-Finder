@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "ruleset_version": "1.1.0",
+  "ruleset_version": "1.2.0",
   "owner": "AppSec / Skill Maintainer",
   "rules": [
     {
@@ -32,7 +32,7 @@
       "code": "TAINT_CRED_TO_NETWORK_OR_EXEC",
       "severity": "CRITICAL",
       "attack_id": "T1041",
-      "description": "Sensitive credential file or non-benign process.env data flows (directly, multi-hop, or via template literal) into a network, DNS, or exec sink."
+      "description": "Sensitive credential file or non-benign process.env data (including optional chaining) flows (directly, multi-hop, via template literals, indirect/.call/.apply invocations, aliased ESM/CJS/createRequire sinks, multi-hop helper wrappers, or bidirectional cross-file/barrel re-export chains) into a network, DNS, or exec sink."
     },
     {
       "code": "ENV_SERIALIZATION_EXFIL",
@@ -44,13 +44,13 @@
       "code": "CHILD_PROCESS_DANGEROUS_EXEC",
       "severity": "CRITICAL",
       "attack_id": "T1059.007",
-      "description": "JavaScript source invokes child_process with download-and-execute pipes, encoded shell commands, or reverse-shell indicators."
+      "description": "JavaScript source invokes child_process (directly, via aliased ESM/CJS/createRequire imports, indirect (0, fn)/.call/.apply/.bind, Reflect.apply, or multi-hop helper wrappers) with download-and-execute pipes, encoded shell commands, or reverse-shell indicators."
     },
     {
       "code": "OBFUSCATED_DYNAMIC_EXEC",
       "severity": "CRITICAL",
       "attack_id": "T1059.007",
-      "description": "Computed/Unicode-escaped eval/Function/child_process lookup, String.fromCharCode chain, or dynamic eval/new Function."
+      "description": "Computed/reversed/concatenated/Unicode-escaped eval/Function/child_process lookup, computed or data:/HTTP(S) dynamic import(), indirect (0, eval/Function)(), .call/.apply/.bind, Function.prototype.constructor, Reflect.get/apply/construct dynamic execution, aliased eval/Function/vm calls, or String.fromCharCode chains."
     },
     {
       "code": "BASE64_PAYLOAD_SUSPICIOUS",
@@ -87,6 +87,18 @@
       "severity": "CRITICAL",
       "attack_id": "T1059",
       "description": "Package manifest name, version, or bin key contains shell metacharacters or path traversal attempting command injection."
+    },
+    {
+      "code": "PROVENANCE_DIGEST_MISMATCH",
+      "severity": "CRITICAL",
+      "attack_id": "T1195.002",
+      "description": "Fetched npm SLSA/in-toto attestation statement subject SHA-512 digest or npm PURL package/version identity diverges from (or omits PURL identity for) the downloaded tarball."
+    },
+    {
+      "code": "PROVENANCE_DSSE_SIGNATURE_INVALID",
+      "severity": "CRITICAL",
+      "attack_id": "T1195.002",
+      "description": "Fetched npm SLSA/in-toto DSSE envelope signature fails cryptographic verification against the bundled verification certificate or key."
     }
   ]
 }

