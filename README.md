@@ -66,7 +66,7 @@ Screens candidates against org allow/deny policy, 7 typosquatting/slopsquatting 
 <img src="skill-src/coldpin/assets/icon.svg" width="20" height="20" align="top" alt=""> **2. Inspect a package or offline tarball**
 
 ```sh
-node --no-warnings src/cli.ts inspect prettier@3.5.3
+node --no-warnings src/cli.ts inspect semver@7.7.1
 node --no-warnings src/cli.ts inspect --tarball ./pkg.tgz --git-dir ./repo --offline --sarif
 ```
 
@@ -120,8 +120,8 @@ Static triage does not replace runtime isolation or human judgment. See [FAQ](do
 - [Privacy & data handling](docs/privacy.md): exact network egress, private-scope non-leakage, and credential boundaries.
 - [FAQ](docs/faq.md): trade-offs, false-positive controls, stock `npx` limits, and REA optionality.
 - [Design specification](docs/designs/coldpin.md) & [Design sitemap](docs/designs/SITEMAP.md): locked architecture after Phase 0 Goldfish review.
-- [Testing & verification](TESTING.md): `27/27` deterministic tests, 9 automated verification gates, cross-platform CI matrix, SkillSpector self-audit, and reproducible build gates.
-- [Benchmarks](skill-src/coldpin/BENCHMARK.md) & [Skill Card](skill-src/coldpin/skill-card.md): real executed Tier 1–2 measurements (`45`-fixture corpus, `16` mutation proofs) and honest Tier 3 status.
+- [Testing & verification](TESTING.md): `28/28` deterministic tests, 9 automated verification gates, cross-platform CI matrix, SkillSpector self-audit, and reproducible build gates.
+- [Benchmarks](skill-src/coldpin/BENCHMARK.md) & [Skill Card](skill-src/coldpin/skill-card.md): real executed Tier 1–2 measurements (`49`-fixture corpus, `18` mutation proofs) and honest Tier 3 status.
 - [Fact Ledger](docs/fact-ledger.md), [Maintenance Cadence](MAINTENANCE.md), & [Changelog](CHANGELOG.md).
 
 ## Contribute & Security

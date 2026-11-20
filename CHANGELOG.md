@@ -2,6 +2,16 @@
 
 All notable changes to `coldpin` (Coldpin; originally drafted under working title `npx-safe-finder`) are documented here following [Keep a Changelog](https://keepachangelog.com/) and Semantic Versioning.
 
+## [1.2.1] - 2026-11-20
+
+### Fixed
+- **Lexical Block/Function Taint Scoping & Benign `envAliases` Filtering (`src/analysis/static-triage.ts`):** Replaced the flat file-wide `taintedVars`/`envAliases`/`processAliases`/`stringVars`/`sinkAliases`/`wrapperSinks` tables with a lexical scope stack (handling `{ ... }` blocks, named/anonymous/method/esbuild string-keyed `__commonJS`/`__esm` function bodies, chained expression-body arrows, block-body function/arrow parameter shadowing, braced and braceless `for (...)` headers, `catch (e)` bindings, per-scope declaration lists, object/array destructuring defaults & multi-entry RHS literals, unconditional-only clean-redeclaration/reassignment kill preventing braceless/short-circuit taint laundering, and scope-bounded wrapper sinks) while preserving 100% recall on closure-captured outer-scope taint, `try`-block outer reassignments, wrapper sinks, and cross-file/barrel re-exports. Unified taint evaluation (`getTaintAt`) ignores object-literal property keys (`{ env: "prod" }`), distinguishes dynamic `process.env[k]` reads from whole-`env` aliases, and checks `BENIGN_ENV_VARS` (including `NODE_DEBUG`, `npm_package_name`, `npm_lifecycle_script`, `TERM_PROGRAM`, `CLICOLOR`, and standard CI/terminal presence flags) and whole-`env` guards before falling back to identifier taint, eliminating bundled-parser false positives such as `prettier@3.5.3` `importFromFile` emitting `CRITICAL: TAINT_CRED_TO_NETWORK_OR_EXEC`.
+- **Non-Regex Unicode RegExp Tolerance & Escape-Density Calibration (`src/analysis/static-triage.ts`):** Updated `lexJavaScriptWithStats` to disambiguate regex literals vs. division after `++`/`--`, member-property keywords (`obj.return / 2`), control headers (`if (s) /[\u0100-...]/`), and statement blocks, handle ECMAScript leading-zero `\u{0000...}` codepoint escapes, and exclude comments and regex literals from both Shannon entropy (`> 5.85` on `nonRegexCodeLen > 800`) and hex/unicode escape counting (`escapeMatches > 60 && (escapeMatches * 6) / nonRegexCodeLen >= 0.06`, plus `_0x` identifier obfuscators `>= 12`), eliminating `HIGH_ENTROPY_OBFUSCATION` false positives on legitimate Unicode character-class RegExp parser tables while catching dense `\xHH`/`\uHHHH` obfuscated string/identifier payloads (including comment-padded payloads).
+
+### Added
+- **CLI `--version` / `-V` Flag (`src/cli.ts`, `README.md`):** Added `--version` and `-V` flags printing `coldpin v${ENGINE_VERSION}` with exit code `0`, documented them in `--help`, and updated the Quickstart clean inspection example in `README.md` to `semver@7.7.1`.
+- **Expanded Regression & Corpus Verification (`tests/hardening-and-packaging.test.ts`, `tests/benchmark-corpus.ts`, `scripts/run_benchmarks.ts`):** Expanded to `28/28` deterministic tests, a 49-fixture security corpus (21 benign + 28 adversarial/fail-closed), and 18 mutation proofs covering esbuild-style bundled scoping, closure-captured taint, parameter shadowing, clean re-declaration, Unicode RegExp parser bundles vs. dense hex/unicode obfuscation, and CLI `--version`/`-V`.
+
 ## [1.2.0] - 2026-11-20
 
 ### Security & Hardening

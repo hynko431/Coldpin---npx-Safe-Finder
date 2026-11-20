@@ -52,7 +52,7 @@ node --no-warnings src/cli.ts --help
 
 ## Full Verification Suite
 
-Run all 9 automated gates (`27/27` tests, skill lint, hygiene, staleness, static eval, SkillSpector self-audit, 45-fixture/16-mutation benchmark verification, DSSE signature verification, and reproducible multi-host packaging) with one command:
+Run all 9 automated gates (`28/28` tests, skill lint, hygiene, staleness, static eval, SkillSpector self-audit, 49-fixture/18-mutation benchmark verification, DSSE signature verification, and reproducible multi-host packaging) with one command:
 
 ```sh
 npm run verify:all

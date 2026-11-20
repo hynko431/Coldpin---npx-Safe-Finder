@@ -1,7 +1,7 @@
-# `coldpin` (Coldpin) — Locked Design Specification (v1.2)
+# `coldpin` (Coldpin) — Locked Design Specification (v1.2.1)
 
 * **Author:** hynko431
-* **Status:** Approved (Phase 0 Goldfish Blockers Resolved + v1.2 Round 2 Security & Provenance Hardening)
+* **Status:** Approved (Phase 0 Goldfish Blockers Resolved + v1.2.1 Lexical Taint Scoping, Non-Regex Obfuscation Calibration & Provenance Hardening)
 * **Date:** 2026-11-20
 
 ---

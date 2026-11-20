@@ -80,15 +80,48 @@ export const LIFECYCLE_HOOKS = new Set([
 
 const BENIGN_ENV_VARS = new Set([
   "NODE_ENV",
+  "NODE_DEBUG",
+  "NODE_DISABLE_COLORS",
+  "NODE_NO_WARNINGS",
+  "NODE_PRESERVE_SYMLINKS",
   "NO_COLOR",
   "FORCE_COLOR",
+  "CLICOLOR",
+  "CLICOLOR_FORCE",
   "CI",
+  "CI_NAME",
+  "GITHUB_ACTIONS",
+  "GITEA_ACTIONS",
+  "CIRCLECI",
+  "TRAVIS",
+  "APPVEYOR",
+  "GITLAB_CI",
+  "BUILDKITE",
+  "DRONE",
+  "TF_BUILD",
+  "TEAMCITY_VERSION",
   "DEBUG",
   "TERM",
+  "TERM_PROGRAM",
+  "TERM_PROGRAM_VERSION",
   "COLORTERM",
+  "COLORFGBG",
+  "VTE_VERSION",
+  "WT_SESSION",
+  "TERMINUS_SUBLIME",
+  "ConEmuANSI",
+  "OSTYPE",
+  "WSL_DISTRO_NAME",
+  "EDITOR",
+  "VISUAL",
+  "PAGER",
+  "PRETTIER_DEBUG",
+  "NO_UPDATE_NOTIFIER",
   "TZ",
   "LANG",
+  "LANGUAGE",
   "LC_ALL",
+  "LC_CTYPE",
   "COLUMNS",
   "LINES",
   "PWD",
@@ -112,7 +145,11 @@ const BENIGN_ENV_VARS = new Set([
   "NODE_OPTIONS",
   "INIT_CWD",
   "npm_lifecycle_event",
+  "npm_lifecycle_script",
+  "npm_package_name",
   "npm_package_version",
+  "npm_config_color",
+  "npm_config_loglevel",
 ]);
 
 const SENSITIVE_CRED_PATTERNS = [
@@ -313,56 +350,139 @@ const REGEX_PRECEDING_PUNCTS = new Set([
   ">",
 ]);
 
-function canStartRegex(prev: JsToken | undefined): boolean {
+const REGEX_CONTROL_PAREN_KEYWORDS = new Set(["if", "while", "for", "with"]);
+
+const OBJ_LITERAL_PRECEDING_PUNCTS = new Set([
+  "=",
+  "(",
+  "[",
+  ",",
+  ":",
+  "?",
+  "!",
+  "&",
+  "|",
+  "+",
+  "-",
+  "*",
+  "%",
+  "<",
+  "^",
+  "~",
+]);
+
+function canStartRegex(
+  tokens: JsToken[],
+  lastClosedParenWasControl: boolean,
+  lastClosedBraceWasStmtBlock: boolean,
+): boolean {
+  const prev = tokens[tokens.length - 1];
+  const prev2 = tokens[tokens.length - 2];
   if (!prev) return true;
-  if (prev.kind === "punct") return REGEX_PRECEDING_PUNCTS.has(prev.value);
-  if (prev.kind === "ident") return REGEX_PRECEDING_KEYWORDS.has(prev.value);
+  if (prev.kind === "punct") {
+    if (prev.value === ")") return lastClosedParenWasControl;
+    if (prev.value === "}") return lastClosedBraceWasStmtBlock;
+    if ((prev.value === "+" || prev.value === "-") && prev2?.kind === "punct" && prev2.value === prev.value) {
+      return false;
+    }
+    return REGEX_PRECEDING_PUNCTS.has(prev.value);
+  }
+  if (prev.kind === "ident") {
+    if (prev2?.kind === "punct" && prev2.value === ".") return false;
+    return REGEX_PRECEDING_KEYWORDS.has(prev.value);
+  }
   return false;
 }
 
-function decodeJsEscape(source: string, idx: number, len: number): { char: string; nextIdx: number; newlines: number } {
+function isHexStr(s: string): boolean {
+  if (s.length === 0) return false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (!((c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102))) return false;
+  }
+  return true;
+}
+
+function decodeJsEscape(
+  source: string,
+  idx: number,
+  len: number,
+): { char: string; nextIdx: number; newlines: number; isHexOrUnicode: boolean } {
   const esc = source.charAt(idx + 1);
   if (esc === "\r" && idx + 2 < len && source.charAt(idx + 2) === "\n") {
-    return { char: "", nextIdx: idx + 3, newlines: 1 };
+    return { char: "", nextIdx: idx + 3, newlines: 1, isHexOrUnicode: false };
   }
   if (esc === "\n") {
-    return { char: "", nextIdx: idx + 2, newlines: 1 };
+    return { char: "", nextIdx: idx + 2, newlines: 1, isHexOrUnicode: false };
   }
   if (esc === "x" && idx + 3 < len) {
-    const hex = Number.parseInt(source.slice(idx + 2, idx + 4), 16);
-    if (Number.isFinite(hex)) return { char: String.fromCharCode(hex), nextIdx: idx + 4, newlines: 0 };
+    const hexSlice = source.slice(idx + 2, idx + 4);
+    if (isHexStr(hexSlice)) {
+      const hex = Number.parseInt(hexSlice, 16);
+      return { char: String.fromCharCode(hex), nextIdx: idx + 4, newlines: 0, isHexOrUnicode: true };
+    }
   }
   if (esc === "u" && idx + 2 < len) {
     if (source.charAt(idx + 2) === "{") {
       const closeBrace = source.indexOf("}", idx + 3);
-      if (closeBrace > idx + 3 && closeBrace - idx <= 10) {
-        const cp = Number.parseInt(source.slice(idx + 3, closeBrace), 16);
-        if (Number.isFinite(cp) && cp >= 0 && cp <= 0x10ffff) {
-          return { char: String.fromCodePoint(cp), nextIdx: closeBrace + 1, newlines: 0 };
+      if (closeBrace > idx + 3 && closeBrace - idx <= 64) {
+        const hexSlice = source.slice(idx + 3, closeBrace);
+        if (isHexStr(hexSlice)) {
+          const trimmed = hexSlice.replace(/^0+/, "") || "0";
+          if (trimmed.length <= 6) {
+            const cp = Number.parseInt(trimmed, 16);
+            if (cp >= 0 && cp <= 0x10ffff) {
+              return { char: String.fromCodePoint(cp), nextIdx: closeBrace + 1, newlines: 0, isHexOrUnicode: true };
+            }
+          }
         }
       }
     } else if (idx + 5 < len) {
-      const hex = Number.parseInt(source.slice(idx + 2, idx + 6), 16);
-      if (Number.isFinite(hex)) return { char: String.fromCharCode(hex), nextIdx: idx + 6, newlines: 0 };
+      const hexSlice = source.slice(idx + 2, idx + 6);
+      if (isHexStr(hexSlice)) {
+        const hex = Number.parseInt(hexSlice, 16);
+        return { char: String.fromCharCode(hex), nextIdx: idx + 6, newlines: 0, isHexOrUnicode: true };
+      }
     }
   }
-  if (esc === "n") return { char: "\n", nextIdx: idx + 2, newlines: 0 };
-  if (esc === "t") return { char: "\t", nextIdx: idx + 2, newlines: 0 };
-  if (esc === "r") return { char: "\r", nextIdx: idx + 2, newlines: 0 };
-  return { char: esc, nextIdx: idx + 2, newlines: 0 };
+  if (esc === "n") return { char: "\n", nextIdx: idx + 2, newlines: 0, isHexOrUnicode: false };
+  if (esc === "t") return { char: "\t", nextIdx: idx + 2, newlines: 0, isHexOrUnicode: false };
+  if (esc === "r") return { char: "\r", nextIdx: idx + 2, newlines: 0, isHexOrUnicode: false };
+  return { char: esc, nextIdx: idx + 2, newlines: 0, isHexOrUnicode: false };
+}
+
+interface JsLexStatsResult {
+  tokens: JsToken[];
+  nonRegexEscapeCount: number;
+  nonRegexSource: string;
 }
 
 /**
  * Single-pass O(n) JS lexer. Handles comments, regex literals, \xHH/\uXXXX/\u{...}
  * string escapes, and template literal ${...} interpolations without ReDoS backtracking.
+ * Also captures non-regex hex/unicode escape counts and comment/regex-stripped source.
  */
-export function lexJavaScript(source: string): JsToken[] {
+function lexJavaScriptWithStats(source: string): JsLexStatsResult {
   const tokens: JsToken[] = [];
   const len = source.length;
   let i = 0;
   let line = 1;
   let braceDepth = 0;
   const templateBraceStack: number[] = [];
+  const parenIsControlStack: boolean[] = [];
+  const braceIsStmtBlockStack: boolean[] = [];
+  let lastClosedParenWasControl = false;
+  let lastClosedBraceWasStmtBlock = false;
+  let nonRegexEscapeCount = 0;
+  const nonRegexParts: string[] = [];
+  let sliceStart = 0;
+
+  const excludeSpan = (spanStart: number, spanEnd: number): void => {
+    if (spanStart > sliceStart) {
+      nonRegexParts.push(source.slice(sliceStart, spanStart));
+    }
+    sliceStart = spanEnd;
+  };
 
   const isIdentStart = (ch: number) =>
     (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95 || ch === 36;
@@ -390,6 +510,7 @@ export function lexJavaScript(source: string): JsToken[] {
       }
       if (cur === 92 && i + 1 < len) {
         const dec = decodeJsEscape(source, i, len);
+        if (dec.isHexOrUnicode) nonRegexEscapeCount++;
         val += dec.char;
         line += dec.newlines;
         i = dec.nextIdx;
@@ -422,22 +543,26 @@ export function lexJavaScript(source: string): JsToken[] {
         const next = source.charCodeAt(i + 1);
         if (next === 47) {
           // Line comment //
+          const commentStart = i;
           i += 2;
           while (i < len && source.charCodeAt(i) !== 10) i++;
+          excludeSpan(commentStart, i);
           continue;
         }
         if (next === 42) {
           // Block comment /* ... */
+          const commentStart = i;
           i += 2;
           while (i + 1 < len && !(source.charCodeAt(i) === 42 && source.charCodeAt(i + 1) === 47)) {
             if (source.charCodeAt(i) === 10) line++;
             i++;
           }
-          i += 2;
+          i = Math.min(len, i + 2);
+          excludeSpan(commentStart, i);
           continue;
         }
       }
-      if (canStartRegex(tokens[tokens.length - 1])) {
+      if (canStartRegex(tokens, lastClosedParenWasControl, lastClosedBraceWasStmtBlock)) {
         const start = i;
         const startLine = line;
         i++;
@@ -446,6 +571,8 @@ export function lexJavaScript(source: string): JsToken[] {
           const rc = source.charCodeAt(i);
           if (rc === 10 || rc === 13) break;
           if (rc === 92 && i + 1 < len) {
+            const nextRc = source.charCodeAt(i + 1);
+            if (nextRc === 10 || nextRc === 13) break;
             i += 2;
             continue;
           }
@@ -462,6 +589,7 @@ export function lexJavaScript(source: string): JsToken[] {
           }
           i++;
         }
+        excludeSpan(start, i);
         tokens.push({ kind: "regex", value: source.slice(start, i), line: startLine });
         continue;
       }
@@ -477,6 +605,7 @@ export function lexJavaScript(source: string): JsToken[] {
         const cur = source.charCodeAt(i);
         if (cur === 92 && i + 1 < len) {
           const dec = decodeJsEscape(source, i, len);
+          if (dec.isHexOrUnicode) nonRegexEscapeCount++;
           val += dec.char;
           line += dec.newlines;
           i = dec.nextIdx;
@@ -498,8 +627,42 @@ export function lexJavaScript(source: string): JsToken[] {
       continue;
     }
 
-    // Braces (track template literal interpolation exits)
+    // Parentheses (track if/while/for/with control headers for regex-vs-division disambiguation)
+    if (ch === 40) {
+      const prev = tokens[tokens.length - 1];
+      const prev2 = tokens[tokens.length - 2];
+      const isCtrl = Boolean(
+        prev?.kind === "ident" &&
+          REGEX_CONTROL_PAREN_KEYWORDS.has(prev.value) &&
+          !(prev2?.kind === "punct" && prev2.value === "."),
+      );
+      parenIsControlStack.push(isCtrl);
+      tokens.push({ kind: "punct", value: "(", line });
+      i++;
+      continue;
+    }
+    if (ch === 41) {
+      lastClosedParenWasControl = parenIsControlStack.pop() ?? false;
+      tokens.push({ kind: "punct", value: ")", line });
+      i++;
+      continue;
+    }
+
+    // Braces (track template literal interpolation exits and statement-block vs object-literal braces)
     if (ch === 123) {
+      const prev = tokens[tokens.length - 1];
+      const prev2 = tokens[tokens.length - 2];
+      const isArrowBlock = prev?.kind === "punct" && prev.value === ">" && prev2?.kind === "punct" && prev2.value === "=";
+      const isObjLiteral =
+        !isArrowBlock &&
+        prev !== undefined &&
+        ((prev.kind === "punct" && OBJ_LITERAL_PRECEDING_PUNCTS.has(prev.value)) ||
+          (prev.kind === "ident" &&
+            REGEX_PRECEDING_KEYWORDS.has(prev.value) &&
+            prev.value !== "else" &&
+            prev.value !== "do" &&
+            !(prev2?.kind === "punct" && prev2.value === ".")));
+      braceIsStmtBlockStack.push(!isObjLiteral);
       braceDepth++;
       tokens.push({ kind: "punct", value: "{", line });
       i++;
@@ -514,6 +677,7 @@ export function lexJavaScript(source: string): JsToken[] {
         readTemplateChunk();
         continue;
       }
+      lastClosedBraceWasStmtBlock = braceIsStmtBlockStack.pop() ?? false;
       braceDepth = Math.max(0, braceDepth - 1);
       tokens.push({ kind: "punct", value: "}", line });
       i++;
@@ -528,6 +692,7 @@ export function lexJavaScript(source: string): JsToken[] {
         const cur = source.charCodeAt(i);
         if (cur === 92 && i + 1 < len && source.charCodeAt(i + 1) === 117) {
           const dec = decodeJsEscape(source, i, len);
+          if (dec.isHexOrUnicode) nonRegexEscapeCount++;
           identVal += dec.char;
           i = dec.nextIdx;
           hadEsc = true;
@@ -559,6 +724,11 @@ export function lexJavaScript(source: string): JsToken[] {
     tokens.push({ kind: "punct", value: source.charAt(i), line });
     i++;
   }
+
+  if (sliceStart < len) {
+    nonRegexParts.push(source.slice(sliceStart));
+  }
+  const nonRegexSource = nonRegexParts.length === 1 ? nonRegexParts[0]! : nonRegexParts.join("");
 
   // Fold constant string-array joins: ["ev", "al"].join("") => "eval"
   const foldConcat = (input: JsToken[]): JsToken[] => {
@@ -670,7 +840,15 @@ export function lexJavaScript(source: string): JsToken[] {
     pass2.push(t);
   }
 
-  return foldConcat(pass2);
+  return {
+    tokens: foldConcat(pass2),
+    nonRegexEscapeCount,
+    nonRegexSource,
+  };
+}
+
+export function lexJavaScript(source: string): JsToken[] {
+  return lexJavaScriptWithStats(source).tokens;
 }
 
 const DECODED_PAYLOAD_INDICATORS = [
@@ -1063,15 +1241,25 @@ export function analyzeSourceBlob(
     }
   }
 
-  // 6. Entropy, escape density, & _0x obfuscator signature check (on code excluding comments)
-  const tokens = lexJavaScript(jsText);
-  const nonEmptyCodeLen = tokens.reduce((acc, t) => acc + t.value.length, 0);
-  const escapeMatches = (jsText.match(/\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}/g) ?? []).length;
+  // 6. Entropy, escape density, & _0x obfuscator signature check (excluding comments & regex literals)
+  const { tokens, nonRegexEscapeCount: escapeMatches, nonRegexSource } = lexJavaScriptWithStats(jsText);
+  let nonRegexCodeLen = 0;
+  for (let ci = 0; ci < nonRegexSource.length; ci++) {
+    const cc = nonRegexSource.charCodeAt(ci);
+    if (cc !== 32 && cc !== 9 && cc !== 10 && cc !== 13) nonRegexCodeLen++;
+  }
+  const escapeDensity = (escapeMatches * 6) / Math.max(1, nonRegexCodeLen);
+  const nonRegexEntropy = nonRegexCodeLen > 800 ? shannonEntropy(nonRegexSource) : 0;
   const hexObfIdents = tokens.reduce(
     (acc, t) => (t.kind === "ident" && /^_0x[0-9a-f]{4,}$/i.test(t.value) ? acc + 1 : acc),
     0,
   );
-  if ((nonEmptyCodeLen > 800 && (shannonEntropy(jsText) > 5.65 || escapeMatches > 60)) || hexObfIdents >= 12) {
+  if (
+    (escapeMatches > 60 && escapeDensity >= 0.06) ||
+    (nonRegexCodeLen > 800 && nonRegexEntropy > 5.85) ||
+    hexObfIdents >= 12
+  ) {
+    const reportedEntropy = nonRegexEntropy > 0 ? nonRegexEntropy : shannonEntropy(nonRegexSource);
     has_obfuscation = true;
     observations.push({
       code: "HIGH_ENTROPY_OBFUSCATION",
@@ -1079,21 +1267,26 @@ export function analyzeSourceBlob(
       path: filePath,
       digest_sha256: sha256,
       attack_id: "T1027",
-      detail: `Obfuscation indicators (entropy=${shannonEntropy(jsText).toFixed(2)}, escapes=${escapeMatches}, _0x_idents=${hexObfIdents}) in '${filePath}'.`,
+      detail: `Obfuscation indicators (entropy=${reportedEntropy.toFixed(2)}, escapes=${escapeMatches}, escape_density=${escapeDensity.toFixed(3)}, _0x_idents=${hexObfIdents}) in '${filePath}'.`,
     });
     unknowns.push(`OBFUSCATED_CODE_UNRECOVERED: '${filePath}' requires REA deobfuscation / deep AST analysis.`);
   }
 
-  // 7. Token-level, alias-aware, multi-hop wrapper-aware, & cross-file taint analysis
-  const taintedVars = new Map<string, { source: string; line: number }>();
-  const processAliases = new Set<string>(["process"]);
-  const envAliases = new Set<string>();
-  const stringVars = new Map<string, string>();
+  // 7. Token-level, lexically-scoped, alias-aware, multi-hop wrapper-aware, & cross-file taint analysis
+  type SinkKind = "network" | "child_exec" | "dynamic_exec";
+  interface ScopedSinkEntry {
+    kind: SinkKind;
+    scopeStart: number;
+    scopeEnd: number;
+    defIdx: number;
+  }
+
+  const initialProcessAliases = new Set<string>(["process"]);
   const regexVars = new Set<string>();
   const requireAliases = new Set<string>(["require"]);
   const createRequireAliases = new Set<string>(["createRequire"]);
-  const sinkAliases = new Map<string, "network" | "child_exec" | "dynamic_exec">();
-  const wrapperSinks = new Map<string, "network" | "child_exec" | "dynamic_exec">();
+  const scopedPrepassSinkAliases = new Map<string, ScopedSinkEntry[]>();
+  const scopedWrapperSinks = new Map<string, ScopedSinkEntry[]>();
   const importedBindings = new Map<string, { from: string; importedName: string }>();
   const importedNamespaces = new Map<string, string>();
   const exportedTainted: ModuleTaintSummary["exported_tainted"] = [];
@@ -1101,6 +1294,51 @@ export function analyzeSourceBlob(
   const exportedSinks: NonNullable<ModuleTaintSummary["exported_sinks"]> = [];
   const importedTaintedCalls: NonNullable<ModuleTaintSummary["imported_tainted_calls"]> = [];
   const reexports: NonNullable<ModuleTaintSummary["reexports"]> = [];
+
+  // Precompute matching closing brace index for every `{` in O(n) so pre-pass wrappers & aliases are scope-bounded
+  const matchingCloseBrace = new Map<number, number>();
+  {
+    const bStack: number[] = [];
+    for (let bi = 0; bi < tokens.length; bi++) {
+      const bv = tokens[bi]!.value;
+      if (bv === "{") bStack.push(bi);
+      else if (bv === "}" && bStack.length > 0) {
+        matchingCloseBrace.set(bStack.pop()!, bi);
+      }
+    }
+  }
+
+  const addScopedSink = (
+    map: Map<string, ScopedSinkEntry[]>,
+    name: string,
+    kind: SinkKind,
+    scopeStart: number,
+    scopeEnd: number,
+    defIdx: number,
+  ): void => {
+    let list = map.get(name);
+    if (!list) {
+      list = [];
+      map.set(name, list);
+    }
+    if (!list.some((e) => e.scopeStart === scopeStart && e.scopeEnd === scopeEnd && e.kind === kind && e.defIdx === defIdx)) {
+      list.push({ kind, scopeStart, scopeEnd, defIdx });
+    }
+  };
+
+  const lookupScopedSinkAt = (map: Map<string, ScopedSinkEntry[]>, name: string, atIdx: number): SinkKind | null => {
+    const list = map.get(name);
+    if (!list) return null;
+    let best: ScopedSinkEntry | null = null;
+    for (const e of list) {
+      if (e.scopeStart <= atIdx && atIdx <= e.scopeEnd) {
+        if (!best || e.scopeEnd - e.scopeStart < best.scopeEnd - best.scopeStart) {
+          best = e;
+        }
+      }
+    }
+    return best ? best.kind : null;
+  };
 
   let hasEnvSerialize = false;
   let hasCredAccess = false;
@@ -1233,9 +1471,33 @@ export function analyzeSourceBlob(
   };
 
   // Returns index of `(` for direct calls `fn(`, optional `fn?.(`, indirect `(0, fn)(`,
-  // or `fn.call(` / `fn.apply(` / `fn?.call(` / `fn?.apply(`
+  // or `fn.call(` / `fn.apply(` / `fn?.call(` / `fn?.apply(`.
+  // Excludes function declarations (`function fn(...)`) and same-line method definitions (`fn(...) {`).
   const getSinkCallArgsStart = (idx: number): number => {
-    if (tokens[idx + 1]?.value === "(") return idx + 1;
+    if (
+      tokens[idx - 1]?.value === "function" ||
+      (tokens[idx - 1]?.value === "*" && tokens[idx - 2]?.value === "function")
+    ) {
+      return -1;
+    }
+    if (tokens[idx + 1]?.value === "(") {
+      let pDepth = 0;
+      let closeP = -1;
+      for (let k = idx + 1; k < Math.min(tokens.length, idx + 64); k++) {
+        if (tokens[k]?.value === "(") pDepth++;
+        else if (tokens[k]?.value === ")") {
+          pDepth--;
+          if (pDepth === 0) {
+            closeP = k;
+            break;
+          }
+        }
+      }
+      if (closeP !== -1 && tokens[closeP + 1]?.value === "{" && tokens[closeP + 1]!.line === tokens[closeP]!.line) {
+        return -1;
+      }
+      return idx + 1;
+    }
     if (tokens[idx + 1]?.value === "?" && tokens[idx + 2]?.value === "." && tokens[idx + 3]?.value === "(") {
       return idx + 3;
     }
@@ -1252,7 +1514,14 @@ export function analyzeSourceBlob(
     return -1;
   };
 
-  const registerModuleBinding = (spec: string, importedName: string, localName: string): void => {
+  const registerModuleBinding = (
+    spec: string,
+    importedName: string,
+    localName: string,
+    scopeStart: number,
+    scopeEnd: number,
+    defIdx: number,
+  ): void => {
     if (spec.startsWith(".")) {
       if (importedName === "*") {
         importedNamespaces.set(localName, spec);
@@ -1266,7 +1535,7 @@ export function analyzeSourceBlob(
       if (importedName === "*" || importedName === "default") {
         childProcessNamespaces.add(localName);
       } else if (CHILD_EXEC_SINKS.has(importedName)) {
-        sinkAliases.set(localName, "child_exec");
+        addScopedSink(scopedPrepassSinkAliases, localName, "child_exec", scopeStart, scopeEnd, defIdx);
       }
       return;
     }
@@ -1274,7 +1543,7 @@ export function analyzeSourceBlob(
       if (importedName === "*" || importedName === "default") {
         vmNamespaces.add(localName);
       } else if (DYNAMIC_EXEC_SINKS.has(importedName) || importedName === "Script") {
-        sinkAliases.set(localName, "dynamic_exec");
+        addScopedSink(scopedPrepassSinkAliases, localName, "dynamic_exec", scopeStart, scopeEnd, defIdx);
       }
       return;
     }
@@ -1290,12 +1559,12 @@ export function analyzeSourceBlob(
       if (importedName === "*" || importedName === "default") {
         dynamicNetworkReceivers.add(localName.toLowerCase());
       } else if (DIRECT_NET_SINKS.has(importedName) || QUALIFIED_NET_METHODS.has(importedName)) {
-        sinkAliases.set(localName, "network");
+        addScopedSink(scopedPrepassSinkAliases, localName, "network", scopeStart, scopeEnd, defIdx);
       }
     }
   };
 
-  const classifyBaseSinkAt = (idx: number): { kind: "network" | "child_exec" | "dynamic_exec"; argsStart: number } | null => {
+  const classifyBaseSinkAt = (idx: number): { kind: SinkKind; argsStart: number } | null => {
     const tok = tokens[idx];
     if (!tok || tok.kind !== "ident") return null;
     const argsStart = getSinkCallArgsStart(idx);
@@ -1328,7 +1597,7 @@ export function analyzeSourceBlob(
     return null;
   };
 
-  const classifySinkAt = (idx: number): { kind: "network" | "child_exec" | "dynamic_exec"; argsStart: number } | null => {
+  const classifyPrepassSinkAt = (idx: number): { kind: SinkKind; argsStart: number } | null => {
     const base = classifyBaseSinkAt(idx);
     if (base) return base;
     const tok = tokens[idx];
@@ -1336,7 +1605,9 @@ export function analyzeSourceBlob(
     const argsStart = getSinkCallArgsStart(idx);
     if (argsStart === -1) return null;
     if (!isNotMemberProp(idx)) return null;
-    const kind = sinkAliases.get(tok.value) ?? wrapperSinks.get(tok.value) ?? null;
+    const kind =
+      lookupScopedSinkAt(scopedPrepassSinkAliases, tok.value, idx) ??
+      lookupScopedSinkAt(scopedWrapperSinks, tok.value, idx);
     return kind ? { kind, argsStart } : null;
   };
 
@@ -1373,18 +1644,39 @@ export function analyzeSourceBlob(
   interface WrapperCandidate {
     name: string;
     line: number;
+    defIdx: number;
+    scopeStart: number;
+    scopeEnd: number;
     isExported: boolean;
     paramNames: Set<string>;
     bodyStart: number;
     isBlockBody: boolean;
+    resolvedKind?: SinkKind;
   }
   const candidateWrappers: WrapperCandidate[] = [];
+  const prepassBraceStack: number[] = [];
+  const currentPrepassSpan = (): { scopeStart: number; scopeEnd: number } => {
+    if (prepassBraceStack.length === 0) return { scopeStart: 0, scopeEnd: Math.max(0, tokens.length - 1) };
+    const openIdx = prepassBraceStack[prepassBraceStack.length - 1]!;
+    return { scopeStart: openIdx, scopeEnd: matchingCloseBrace.get(openIdx) ?? Math.max(0, tokens.length - 1) };
+  };
 
-  // Pre-pass 1a: Collect ESM/CJS/await/createRequire imports, RegExp vars, direct top-level sink aliases,
-  // barrel re-exports, and candidate wrapper functions.
+  // Pre-pass 1a: Collect ESM/CJS/await/createRequire imports, RegExp vars, scope-bounded sink aliases,
+  // barrel re-exports, and scope-bounded candidate wrapper functions.
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!;
     const t1 = tokens[i + 1];
+
+    if (t.value === "{") {
+      prepassBraceStack.push(i);
+      continue;
+    }
+    if (t.value === "}") {
+      if (prepassBraceStack.length > 0) prepassBraceStack.pop();
+      continue;
+    }
+
+    const span = currentPrepassSpan();
 
     // Track regex-initialized variables (`const re = /.../` or `const re = new RegExp(...)`) so re.exec() is not misclassified as child_process.exec()
     if (
@@ -1416,9 +1708,9 @@ export function analyzeSourceBlob(
       if (fromIdx > i + 1) {
         const spec = tokens[fromIdx + 1]!.value;
         if (t1?.value === "*" && tokens[i + 2]?.value === "as" && tokens[i + 3]?.kind === "ident") {
-          registerModuleBinding(spec, "*", tokens[i + 3]!.value);
+          registerModuleBinding(spec, "*", tokens[i + 3]!.value, span.scopeStart, span.scopeEnd, i);
         } else if (t1?.kind === "ident" && t1.value !== "type") {
-          registerModuleBinding(spec, "default", t1.value);
+          registerModuleBinding(spec, "default", t1.value, span.scopeStart, span.scopeEnd, i);
         }
         for (let k = i + 1; k < fromIdx; k++) {
           if (tokens[k]?.value === "{") {
@@ -1426,10 +1718,10 @@ export function analyzeSourceBlob(
               const nm = tokens[j]!;
               if (nm.kind !== "ident") continue;
               if (tokens[j + 1]?.value === "as" && tokens[j + 2]?.kind === "ident") {
-                registerModuleBinding(spec, nm.value, tokens[j + 2]!.value);
+                registerModuleBinding(spec, nm.value, tokens[j + 2]!.value, span.scopeStart, span.scopeEnd, i);
                 j += 2;
               } else {
-                registerModuleBinding(spec, nm.value, nm.value);
+                registerModuleBinding(spec, nm.value, nm.value, span.scopeStart, span.scopeEnd, i);
               }
             }
             break;
@@ -1471,7 +1763,7 @@ export function analyzeSourceBlob(
       }
     }
 
-    // CJS require / createRequire / await import / namespace destructuring / top-level sink aliases (ASI-safe)
+    // CJS require / createRequire / await import / namespace destructuring / scope-bounded sink aliases (ASI-safe)
     if (t.kind === "ident" && (t.value === "const" || t.value === "let" || t.value === "var")) {
       if (t1?.kind === "ident" && tokens[i + 2]?.value === "=") {
         const r0 = tokens[i + 3];
@@ -1479,7 +1771,7 @@ export function analyzeSourceBlob(
         const r2 = tokens[i + 5];
         const r3 = tokens[i + 6];
         if (r0?.kind === "ident" && requireAliases.has(r0.value) && r1?.value === "(" && r2?.kind === "string") {
-          registerModuleBinding(r2.value, "default", t1.value);
+          registerModuleBinding(r2.value, "default", t1.value, span.scopeStart, span.scopeEnd, i);
         } else if (
           r0?.kind === "ident" &&
           ((createRequireAliases.has(r0.value) && r1?.value === "(") ||
@@ -1494,15 +1786,16 @@ export function analyzeSourceBlob(
           r2?.value === "(" &&
           r3?.kind === "string"
         ) {
-          registerModuleBinding(r3.value, "*", t1.value);
+          registerModuleBinding(r3.value, "*", t1.value, span.scopeStart, span.scopeEnd, i);
         } else if (
           r0?.kind === "ident" &&
           (isStmtEnd(r0, r1) || (r1?.value === "." && r2?.value === "bind" && r3?.value === "("))
         ) {
-          if (DIRECT_NET_SINKS.has(r0.value)) sinkAliases.set(t1.value, "network");
-          else if (CHILD_EXEC_SINKS.has(r0.value)) sinkAliases.set(t1.value, "child_exec");
-          else if (DYNAMIC_EXEC_SINKS.has(r0.value)) sinkAliases.set(t1.value, "dynamic_exec");
-          else if (sinkAliases.has(r0.value)) sinkAliases.set(t1.value, sinkAliases.get(r0.value)!);
+          const prevAlias = lookupScopedSinkAt(scopedPrepassSinkAliases, r0.value, i);
+          if (DIRECT_NET_SINKS.has(r0.value)) addScopedSink(scopedPrepassSinkAliases, t1.value, "network", span.scopeStart, span.scopeEnd, i);
+          else if (CHILD_EXEC_SINKS.has(r0.value)) addScopedSink(scopedPrepassSinkAliases, t1.value, "child_exec", span.scopeStart, span.scopeEnd, i);
+          else if (DYNAMIC_EXEC_SINKS.has(r0.value)) addScopedSink(scopedPrepassSinkAliases, t1.value, "dynamic_exec", span.scopeStart, span.scopeEnd, i);
+          else if (prevAlias) addScopedSink(scopedPrepassSinkAliases, t1.value, prevAlias, span.scopeStart, span.scopeEnd, i);
         } else if (
           r0?.kind === "ident" &&
           r1?.value === "." &&
@@ -1511,14 +1804,15 @@ export function analyzeSourceBlob(
           (isStmtEnd(r2, r3) || (r3?.value === "." && tokens[i + 7]?.value === "bind" && tokens[i + 8]?.value === "("))
         ) {
           const meth = r2.value;
-          if (CHILD_EXEC_SINKS.has(meth) && !regexVars.has(r0.value)) sinkAliases.set(t1.value, "child_exec");
-          else if (DYNAMIC_EXEC_SINKS.has(meth) && (GLOBAL_OBJ_NAMES.has(r0.value) || vmNamespaces.has(r0.value) || meth !== "eval")) {
-            sinkAliases.set(t1.value, "dynamic_exec");
+          if (CHILD_EXEC_SINKS.has(meth) && !regexVars.has(r0.value)) {
+            addScopedSink(scopedPrepassSinkAliases, t1.value, "child_exec", span.scopeStart, span.scopeEnd, i);
+          } else if (DYNAMIC_EXEC_SINKS.has(meth) && (GLOBAL_OBJ_NAMES.has(r0.value) || vmNamespaces.has(r0.value) || meth !== "eval")) {
+            addScopedSink(scopedPrepassSinkAliases, t1.value, "dynamic_exec", span.scopeStart, span.scopeEnd, i);
           } else if (
             dynamicNetworkReceivers.has(r0.value.toLowerCase()) &&
             (DIRECT_NET_SINKS.has(meth) || QUALIFIED_NET_METHODS.has(meth))
           ) {
-            sinkAliases.set(t1.value, "network");
+            addScopedSink(scopedPrepassSinkAliases, t1.value, "network", span.scopeStart, span.scopeEnd, i);
           }
         }
       } else if (t1?.value === "{") {
@@ -1547,7 +1841,7 @@ export function analyzeSourceBlob(
             tokens[closeIdx + 4]?.kind === "string"
           ) {
             const spec = tokens[closeIdx + 4]!.value;
-            for (const p of pairs) registerModuleBinding(spec, p.importedName, p.localName);
+            for (const p of pairs) registerModuleBinding(spec, p.importedName, p.localName, span.scopeStart, span.scopeEnd, i);
           } else if (
             rhs0?.value === "await" &&
             tokens[closeIdx + 3]?.value === "import" &&
@@ -1555,16 +1849,18 @@ export function analyzeSourceBlob(
             tokens[closeIdx + 5]?.kind === "string"
           ) {
             const spec = tokens[closeIdx + 5]!.value;
-            for (const p of pairs) registerModuleBinding(spec, p.importedName, p.localName);
+            for (const p of pairs) registerModuleBinding(spec, p.importedName, p.localName, span.scopeStart, span.scopeEnd, i);
           } else if (rhs0?.kind === "ident") {
             if (childProcessNamespaces.has(rhs0.value)) {
               for (const p of pairs) {
-                if (CHILD_EXEC_SINKS.has(p.importedName)) sinkAliases.set(p.localName, "child_exec");
+                if (CHILD_EXEC_SINKS.has(p.importedName)) {
+                  addScopedSink(scopedPrepassSinkAliases, p.localName, "child_exec", span.scopeStart, span.scopeEnd, i);
+                }
               }
             } else if (vmNamespaces.has(rhs0.value)) {
               for (const p of pairs) {
                 if (DYNAMIC_EXEC_SINKS.has(p.importedName) || p.importedName === "Script") {
-                  sinkAliases.set(p.localName, "dynamic_exec");
+                  addScopedSink(scopedPrepassSinkAliases, p.localName, "dynamic_exec", span.scopeStart, span.scopeEnd, i);
                 }
               }
             } else if (moduleNamespaces.has(rhs0.value)) {
@@ -1574,14 +1870,18 @@ export function analyzeSourceBlob(
             } else if (dynamicNetworkReceivers.has(rhs0.value.toLowerCase())) {
               for (const p of pairs) {
                 if (DIRECT_NET_SINKS.has(p.importedName) || QUALIFIED_NET_METHODS.has(p.importedName)) {
-                  sinkAliases.set(p.localName, "network");
+                  addScopedSink(scopedPrepassSinkAliases, p.localName, "network", span.scopeStart, span.scopeEnd, i);
                 }
               }
             } else if (GLOBAL_OBJ_NAMES.has(rhs0.value)) {
               for (const p of pairs) {
-                if (DYNAMIC_EXEC_SINKS.has(p.importedName)) sinkAliases.set(p.localName, "dynamic_exec");
-                else if (DIRECT_NET_SINKS.has(p.importedName)) sinkAliases.set(p.localName, "network");
-                else if (p.importedName === "process") processAliases.add(p.localName);
+                if (DYNAMIC_EXEC_SINKS.has(p.importedName)) {
+                  addScopedSink(scopedPrepassSinkAliases, p.localName, "dynamic_exec", span.scopeStart, span.scopeEnd, i);
+                } else if (DIRECT_NET_SINKS.has(p.importedName)) {
+                  addScopedSink(scopedPrepassSinkAliases, p.localName, "network", span.scopeStart, span.scopeEnd, i);
+                } else if (p.importedName === "process") {
+                  initialProcessAliases.add(p.localName);
+                }
               }
             }
           }
@@ -1690,6 +1990,9 @@ export function analyzeSourceBlob(
         candidateWrappers.push({
           name: fnName,
           line: t.line,
+          defIdx: i,
+          scopeStart: span.scopeStart,
+          scopeEnd: span.scopeEnd,
           isExported: isExportedFn,
           paramNames,
           bodyStart,
@@ -1700,11 +2003,11 @@ export function analyzeSourceBlob(
   }
 
   // Pre-pass 1b: Bounded fixpoint multi-hop wrapper resolution (up to 6 hops, order-independent,
-  // ASI-safe expression-body boundaries, tracking local variables derived from wrapper parameters).
+  // scope-bounded, ASI-safe expression-body boundaries, tracking local variables derived from wrapper parameters).
   for (let pass = 0; pass < 6; pass++) {
     let changed = false;
     for (const cand of candidateWrappers) {
-      if (wrapperSinks.has(cand.name)) continue;
+      if (cand.resolvedKind) continue;
       const localParamTaint = new Set<string>(cand.paramNames);
       let bDepth = 0;
       let exprParenDepth = 0;
@@ -1746,10 +2049,11 @@ export function analyzeSourceBlob(
           }
         }
 
-        const innerSink = classifySinkAt(k);
+        const innerSink = classifyPrepassSinkAt(k);
         if (innerSink) {
           if (innerSink.kind === "dynamic_exec") {
-            wrapperSinks.set(cand.name, "dynamic_exec");
+            cand.resolvedKind = "dynamic_exec";
+            addScopedSink(scopedWrapperSinks, cand.name, "dynamic_exec", cand.scopeStart, cand.scopeEnd, cand.defIdx);
             changed = true;
             break;
           }
@@ -1761,12 +2065,13 @@ export function analyzeSourceBlob(
               aDepth--;
               if (aDepth <= 0) break;
             } else if (at.kind === "ident" && isNotMemberProp(a) && localParamTaint.has(at.value)) {
-              wrapperSinks.set(cand.name, innerSink.kind);
+              cand.resolvedKind = innerSink.kind;
+              addScopedSink(scopedWrapperSinks, cand.name, innerSink.kind, cand.scopeStart, cand.scopeEnd, cand.defIdx);
               changed = true;
               break;
             }
           }
-          if (wrapperSinks.has(cand.name)) break;
+          if (cand.resolvedKind) break;
         }
       }
     }
@@ -1774,45 +2079,218 @@ export function analyzeSourceBlob(
   }
 
   for (const cand of candidateWrappers) {
-    if (cand.isExported) {
-      const sk = wrapperSinks.get(cand.name);
-      if (sk) {
-        exportedSinks.push({ name: cand.name, sink_kind: sk, line: cand.line });
-      }
+    if (cand.isExported && cand.resolvedKind) {
+      exportedSinks.push({ name: cand.name, sink_kind: cand.resolvedKind, line: cand.line });
     }
   }
 
-  // Match `process.env`, `process?.env`, `process["env"]`, `globalThis.process?.env`, `globalThis["process"]["env"]`,
-  // `p.env`, `Reflect.get(process, "env")`, or env alias `env` + optional `.KEY`/`?.KEY`/`["KEY"]`/`?.["KEY"]`
-  const matchProcessEnvAt = (idx: number): { matched: boolean; propName?: string; endIdx?: number } => {
+  interface TaintEntry {
+    source: string;
+    line: number;
+  }
+
+  interface ScopeFrame {
+    kind: "root" | "function" | "block" | "arrow_expr" | "for_stmt";
+    declaredVars: Set<string>;
+    taintedVars: Map<string, TaintEntry | null>;
+    envAliases: Map<string, boolean>;
+    processAliases: Map<string, boolean>;
+    stringVars: Map<string, string | null>;
+    sinkAliases: Map<string, SinkKind | null>;
+    activeDeclKind: "const" | "let" | "var" | null;
+    activeDeclDepth: { paren: number; bracket: number; brace: number };
+    activeDeclExported: boolean;
+    activeDeclUnconditional: boolean;
+    ownerVarName?: string;
+    ownerFrame?: ScopeFrame;
+    ownerIsExported?: boolean;
+    ownerIsDefaultExport?: boolean;
+    ownerLine?: number;
+    returnsTaint?: TaintEntry;
+    arrowDepth?: { paren: number; bracket: number; brace: number };
+    forStmtAfterParen?: number;
+    forStmtDepth?: { paren: number; bracket: number; brace: number };
+  }
+
+  const makeScope = (kind: ScopeFrame["kind"]): ScopeFrame => ({
+    kind,
+    declaredVars: new Set<string>(),
+    taintedVars: new Map<string, TaintEntry | null>(),
+    envAliases: new Map<string, boolean>(),
+    processAliases: new Map<string, boolean>(),
+    stringVars: new Map<string, string | null>(),
+    sinkAliases: new Map<string, SinkKind | null>(),
+    activeDeclKind: null,
+    activeDeclDepth: { paren: 0, bracket: 0, brace: 0 },
+    activeDeclExported: false,
+    activeDeclUnconditional: true,
+  });
+
+  const rootScope = makeScope("root");
+  for (const pa of initialProcessAliases) {
+    rootScope.processAliases.set(pa, true);
+  }
+  const scopes: ScopeFrame[] = [rootScope];
+
+  const currentScope = (): ScopeFrame => scopes[scopes.length - 1]!;
+  const currentFunctionOrRootScope = (): ScopeFrame => {
+    for (let s = scopes.length - 1; s >= 0; s--) {
+      const k = scopes[s]!.kind;
+      if (k === "function" || k === "root") return scopes[s]!;
+    }
+    return rootScope;
+  };
+  const lookupTainted = (name: string): TaintEntry | undefined => {
+    for (let s = scopes.length - 1; s >= 0; s--) {
+      const map = scopes[s]!.taintedVars;
+      if (map.has(name)) return map.get(name) ?? undefined;
+    }
+    return undefined;
+  };
+  const isEnvAlias = (name: string): boolean => {
+    for (let s = scopes.length - 1; s >= 0; s--) {
+      const map = scopes[s]!.envAliases;
+      if (map.has(name)) return map.get(name) === true;
+    }
+    return false;
+  };
+  const isProcessAlias = (name: string): boolean => {
+    for (let s = scopes.length - 1; s >= 0; s--) {
+      const map = scopes[s]!.processAliases;
+      if (map.has(name)) return map.get(name) === true;
+    }
+    return false;
+  };
+  const lookupStringVar = (name: string): string | undefined => {
+    for (let s = scopes.length - 1; s >= 0; s--) {
+      const map = scopes[s]!.stringVars;
+      if (map.has(name)) return map.get(name) ?? undefined;
+    }
+    return undefined;
+  };
+  const findDeclaredScope = (name: string): ScopeFrame | undefined => {
+    for (let s = scopes.length - 1; s >= 0; s--) {
+      if (scopes[s]!.declaredVars.has(name)) return scopes[s]!;
+    }
+    return undefined;
+  };
+  const isShadowedLocally = (name: string): boolean => {
+    for (let s = scopes.length - 1; s >= 1; s--) {
+      if (scopes[s]!.declaredVars.has(name)) return true;
+    }
+    return false;
+  };
+  const lookupPrepassSinkDefAt = (name: string, defIdx: number): SinkKind | null => {
+    for (const map of [scopedPrepassSinkAliases, scopedWrapperSinks]) {
+      const list = map.get(name);
+      if (!list) continue;
+      for (const e of list) {
+        if (e.defIdx === defIdx) return e.kind;
+      }
+    }
+    return null;
+  };
+  const lookupEffectiveSink = (name: string, atIdx: number): SinkKind | null => {
+    for (let s = scopes.length - 1; s >= 0; s--) {
+      const map = scopes[s]!.sinkAliases;
+      if (map.has(name)) return map.get(name) ?? null;
+    }
+    return (
+      lookupScopedSinkAt(scopedPrepassSinkAliases, name, atIdx) ??
+      lookupScopedSinkAt(scopedWrapperSinks, name, atIdx)
+    );
+  };
+  const classifySinkAt = (idx: number): { kind: SinkKind; argsStart: number } | null => {
+    const base = classifyBaseSinkAt(idx);
+    if (base) return base;
     const tok = tokens[idx];
-    if (!tok || tok.kind !== "ident") return { matched: false };
+    if (!tok || tok.kind !== "ident") return null;
+    const argsStart = getSinkCallArgsStart(idx);
+    if (argsStart === -1) return null;
+    if (!isNotMemberProp(idx)) return null;
+    const kind = lookupEffectiveSink(tok.value, idx);
+    return kind ? { kind, argsStart } : null;
+  };
+  const bindCleanInFrame = (frame: ScopeFrame, name: string, sinkOverride: SinkKind | null = null): void => {
+    frame.declaredVars.add(name);
+    frame.taintedVars.set(name, null);
+    frame.envAliases.set(name, false);
+    frame.processAliases.set(name, false);
+    frame.stringVars.set(name, null);
+    frame.sinkAliases.set(name, sinkOverride);
+  };
+
+  // True when `ident` at idx is an object literal property key (`{ env: "prod" }` or `{ a: 1, env: "prod" }`),
+  // NOT a variable read (shorthand `{ env }` and ternary `cond ? env : "x"` return false).
+  const isObjectLiteralKey = (idx: number): boolean =>
+    tokens[idx]?.kind === "ident" &&
+    tokens[idx + 1]?.value === ":" &&
+    (tokens[idx - 1]?.value === "{" || tokens[idx - 1]?.value === ",");
+
+  // Match `process`, process alias `p`, `globalThis.process`, `globalThis?.process`, `globalThis["process"]`,
+  // or `Reflect.get(globalThis, "process")`
+  const matchProcessObjAt = (idx: number): { matched: boolean; endIdx: number } => {
+    const tok = tokens[idx];
+    if (!tok || tok.kind !== "ident" || isObjectLiteralKey(idx)) return { matched: false, endIdx: idx };
+    if (tok.value === "Reflect" && isNotMemberProp(idx)) {
+      const refDot = matchDotPropIdx(idx + 1);
+      if (
+        refDot !== -1 &&
+        tokens[refDot]?.value === "get" &&
+        tokens[refDot + 1]?.value === "(" &&
+        tokens[refDot + 2]?.kind === "ident" &&
+        GLOBAL_OBJ_NAMES.has(tokens[refDot + 2]!.value) &&
+        tokens[refDot + 3]?.value === "," &&
+        tokens[refDot + 4]?.kind === "string" &&
+        tokens[refDot + 4]?.value === "process" &&
+        tokens[refDot + 5]?.value === ")"
+      ) {
+        return { matched: true, endIdx: refDot + 5 };
+      }
+    }
+    if (GLOBAL_OBJ_NAMES.has(tok.value) && isNotMemberProp(idx)) {
+      const pDot = matchDotPropIdx(idx + 1);
+      if (pDot !== -1 && tokens[pDot]?.value === "process") {
+        return { matched: true, endIdx: pDot };
+      }
+      const pBr = matchOptBracketIdx(idx + 1);
+      if (pBr !== -1 && tokens[pBr + 1]?.kind === "string" && tokens[pBr + 1]?.value === "process" && tokens[pBr + 2]?.value === "]") {
+        return { matched: true, endIdx: pBr + 2 };
+      }
+    }
+    if (isProcessAlias(tok.value) && isNotMemberProp(idx)) {
+      return { matched: true, endIdx: idx };
+    }
+    return { matched: false, endIdx: idx };
+  };
+
+  // Match `process.env`, `process?.env`, `process["env"]`, `globalThis.process?.env`, `globalThis["process"]["env"]`,
+  // `p.env`, `Reflect.get(process, "env")`, or env alias `env` + optional `.KEY`/`?.KEY`/`["KEY"]`/`?.["KEY"]`/`[dynKey]`
+  const matchProcessEnvAt = (
+    idx: number,
+  ): { matched: boolean; propName?: string; isDynamicProp?: boolean; endIdx?: number } => {
+    const tok = tokens[idx];
+    if (!tok || tok.kind !== "ident" || isObjectLiteralKey(idx)) return { matched: false };
 
     let afterEnvIdx = -1;
-    // Reflect.get(process, "env")
-    const refDot = tok.value === "Reflect" ? matchDotPropIdx(idx + 1) : -1;
-    if (
-      refDot !== -1 &&
-      tokens[refDot]?.value === "get" &&
-      tokens[refDot + 1]?.value === "(" &&
-      tokens[refDot + 2]?.kind === "ident" &&
-      processAliases.has(tokens[refDot + 2]!.value) &&
-      tokens[refDot + 3]?.value === "," &&
-      tokens[refDot + 4]?.kind === "string" &&
-      tokens[refDot + 4]?.value === "env" &&
-      tokens[refDot + 5]?.value === ")"
-    ) {
-      afterEnvIdx = refDot + 6;
-    } else if (GLOBAL_OBJ_NAMES.has(tok.value) && isNotMemberProp(idx)) {
-      let afterProcIdx = -1;
-      const pDot = matchDotPropIdx(idx + 1);
-      const pBr = matchOptBracketIdx(idx + 1);
-      if (pDot !== -1 && tokens[pDot]?.value === "process") {
-        afterProcIdx = pDot + 1;
-      } else if (pBr !== -1 && tokens[pBr + 1]?.kind === "string" && tokens[pBr + 1]?.value === "process" && tokens[pBr + 2]?.value === "]") {
-        afterProcIdx = pBr + 3;
+    // Reflect.get(<processObj>, "env")
+    const refDot = tok.value === "Reflect" && isNotMemberProp(idx) ? matchDotPropIdx(idx + 1) : -1;
+    if (refDot !== -1 && tokens[refDot]?.value === "get" && tokens[refDot + 1]?.value === "(") {
+      const pm = matchProcessObjAt(refDot + 2);
+      if (
+        pm.matched &&
+        tokens[pm.endIdx + 1]?.value === "," &&
+        tokens[pm.endIdx + 2]?.kind === "string" &&
+        tokens[pm.endIdx + 2]?.value === "env" &&
+        tokens[pm.endIdx + 3]?.value === ")"
+      ) {
+        afterEnvIdx = pm.endIdx + 4;
       }
-      if (afterProcIdx !== -1) {
+    }
+    if (afterEnvIdx === -1) {
+      const pm = matchProcessObjAt(idx);
+      if (pm.matched) {
+        const afterProcIdx = pm.endIdx + 1;
         const eDot = matchDotPropIdx(afterProcIdx);
         const eBr = matchOptBracketIdx(afterProcIdx);
         if (eDot !== -1 && tokens[eDot]?.value === "env") {
@@ -1820,17 +2298,9 @@ export function analyzeSourceBlob(
         } else if (eBr !== -1 && tokens[eBr + 1]?.kind === "string" && tokens[eBr + 1]?.value === "env" && tokens[eBr + 2]?.value === "]") {
           afterEnvIdx = eBr + 3;
         }
+      } else if (isEnvAlias(tok.value) && isNotMemberProp(idx)) {
+        afterEnvIdx = idx + 1;
       }
-    } else if (processAliases.has(tok.value) && isNotMemberProp(idx)) {
-      const eDot = matchDotPropIdx(idx + 1);
-      const eBr = matchOptBracketIdx(idx + 1);
-      if (eDot !== -1 && tokens[eDot]?.value === "env") {
-        afterEnvIdx = eDot + 1;
-      } else if (eBr !== -1 && tokens[eBr + 1]?.kind === "string" && tokens[eBr + 1]?.value === "env" && tokens[eBr + 2]?.value === "]") {
-        afterEnvIdx = eBr + 3;
-      }
-    } else if (envAliases.has(tok.value) && isNotMemberProp(idx)) {
-      afterEnvIdx = idx + 1;
     }
 
     if (afterEnvIdx === -1) return { matched: false };
@@ -1839,17 +2309,653 @@ export function analyzeSourceBlob(
       return { matched: true, propName: tokens[kDot]?.value, endIdx: kDot };
     }
     const kBr = matchOptBracketIdx(afterEnvIdx);
-    if (kBr !== -1 && tokens[kBr + 1]?.kind === "string" && tokens[kBr + 2]?.value === "]") {
-      return { matched: true, propName: tokens[kBr + 1]?.value, endIdx: kBr + 2 };
+    if (kBr !== -1) {
+      if (tokens[kBr + 1]?.kind === "string" && tokens[kBr + 2]?.value === "]") {
+        return { matched: true, propName: tokens[kBr + 1]?.value, endIdx: kBr + 2 };
+      }
+      if (tokens[kBr + 1]?.kind === "ident" && tokens[kBr + 2]?.value === "]") {
+        const resolvedProp = lookupStringVar(tokens[kBr + 1]!.value);
+        if (resolvedProp !== undefined) {
+          return { matched: true, propName: resolvedProp, endIdx: kBr + 2 };
+        }
+      }
+      // Dynamic property access `process.env[k]` / `env2[k]`: tainted value, NOT whole-env alias!
+      return { matched: true, isDynamicProp: true, endIdx: afterEnvIdx - 1 };
     }
     return { matched: true, endIdx: afterEnvIdx - 1 };
   };
 
+  // True when a bare whole-env reference (no .PROP) is only used as a presence/truthy/type guard
+  // (e.g., `"NO_COLOR" in env2`, `env2 && env2.NO_COLOR`, `env2 ? env2.TERM : ""`, `typeof process.env`)
+  const isBenignWholeEnvGuard = (startIdx: number, endIdx: number): boolean => {
+    if (
+      tokens[startIdx - 1]?.kind === "ident" &&
+      tokens[startIdx - 1]?.value === "in" &&
+      tokens[startIdx - 2]?.kind === "string" &&
+      BENIGN_ENV_VARS.has(tokens[startIdx - 2]!.value)
+    ) {
+      return true;
+    }
+    if (
+      tokens[startIdx - 1]?.value === "(" &&
+      (tokens[startIdx - 2]?.value === "hasOwn" ||
+        (tokens[startIdx - 2]?.value === "has" && tokens[startIdx - 4]?.value === "Reflect") ||
+        (tokens[startIdx - 2]?.value === "call" && tokens[startIdx - 4]?.value === "hasOwnProperty")) &&
+      tokens[endIdx + 1]?.value === "," &&
+      tokens[endIdx + 2]?.kind === "string" &&
+      BENIGN_ENV_VARS.has(tokens[endIdx + 2]!.value)
+    ) {
+      return true;
+    }
+    if (tokens[startIdx - 1]?.value === "typeof" || tokens[startIdx - 1]?.value === "!") {
+      return true;
+    }
+    if (
+      tokens[startIdx - 1]?.value === "(" &&
+      tokens[startIdx - 2]?.value === "Boolean" &&
+      tokens[endIdx + 1]?.value === ")"
+    ) {
+      return true;
+    }
+    const nxt1 = tokens[endIdx + 1]?.value;
+    const nxt2 = tokens[endIdx + 2]?.value;
+    if (nxt1 === "&" && nxt2 === "&") return true;
+    if (nxt1 === "?" && nxt2 !== "." && nxt2 !== "?") return true;
+    if ((nxt1 === "=" || nxt1 === "!") && nxt2 === "=") return true;
+    return false;
+  };
+
+  // Unified taint lookup at token index `k`: evaluates env aliases & BENIGN_ENV_VARS BEFORE
+  // checking taintedVars so `env2.NO_COLOR` never falsely taints via `env2`, and ignores object keys.
+  const getTaintAt = (
+    idx: number,
+  ): {
+    tainted: boolean;
+    source?: string;
+    line?: number;
+    isDirectEnv?: boolean;
+    isWholeEnv?: boolean;
+    endIdx?: number;
+  } => {
+    if (isObjectLiteralKey(idx)) return { tainted: false };
+    const envM = matchProcessEnvAt(idx);
+    if (envM.matched) {
+      const eIdx = envM.endIdx ?? idx;
+      if (envM.propName && BENIGN_ENV_VARS.has(envM.propName)) {
+        return { tainted: false, endIdx: eIdx };
+      }
+      if (!envM.propName && !envM.isDynamicProp && isBenignWholeEnvGuard(idx, eIdx)) {
+        return { tainted: false, endIdx: eIdx };
+      }
+      return {
+        tainted: true,
+        source: envM.propName ? `process.env.${envM.propName}` : envM.isDynamicProp ? "process.env[dynamic]" : "process.env",
+        isDirectEnv: true,
+        isWholeEnv: !envM.propName && !envM.isDynamicProp,
+        endIdx: eIdx,
+      };
+    }
+    const tk = tokens[idx];
+    if (tk?.kind === "ident" && isNotMemberProp(idx)) {
+      const tv = lookupTainted(tk.value);
+      if (tv) {
+        return { tainted: true, source: tv.source, line: tv.line, endIdx: idx };
+      }
+    }
+    return { tainted: false };
+  };
+
+  const findMatchingCloseParen = (openIdx: number): number => {
+    if (tokens[openIdx]?.value !== "(") return -1;
+    let depth = 0;
+    for (let k = openIdx; k < Math.min(tokens.length, openIdx + 512); k++) {
+      if (tokens[k]?.value === "(") depth++;
+      else if (tokens[k]?.value === ")") {
+        depth--;
+        if (depth === 0) return k;
+      }
+    }
+    return -1;
+  };
+
+  const findMatchingOpenParen = (closeIdx: number): number => {
+    if (tokens[closeIdx]?.value !== ")") return -1;
+    let depth = 0;
+    for (let k = closeIdx; k >= Math.max(0, closeIdx - 512); k--) {
+      if (tokens[k]?.value === ")") depth++;
+      else if (tokens[k]?.value === "(") {
+        depth--;
+        if (depth === 0) return k;
+      }
+    }
+    return -1;
+  };
+
+  interface ParamBinding {
+    name: string;
+    defaultTaint?: TaintEntry;
+  }
+
+  const extractParamBindings = (openIdx: number, closeIdx: number): ParamBinding[] => {
+    const out: ParamBinding[] = [];
+    let destrDepth = 0;
+    for (let k = openIdx + 1; k < closeIdx; k++) {
+      const tk = tokens[k]!;
+      if (tk.value === "=") {
+        // Default parameter expression: scan until `,` at depth 0 (or closing `}`/`]` of enclosing destructuring)
+        let skipDepth = 0;
+        let defTaint: TaintEntry | undefined;
+        let m = k + 1;
+        for (; m < closeIdx; m++) {
+          const mt = tokens[m]!;
+          if (mt.value === "(" || mt.value === "[" || mt.value === "{") {
+            skipDepth++;
+          } else if (mt.value === ")" || mt.value === "]" || mt.value === "}") {
+            if (skipDepth === 0) {
+              if (mt.value === "}" || mt.value === "]") destrDepth = Math.max(0, destrDepth - 1);
+              break;
+            }
+            skipDepth--;
+          } else if (mt.value === "," && skipDepth === 0) {
+            break;
+          } else if (!defTaint) {
+            if ((mt.kind === "string" && matchesCredPattern(mt.value) !== null) || matchJoinedCredPathAt(m) !== null) {
+              defTaint = { source: "credential_file", line: mt.line };
+            } else {
+              const tm = getTaintAt(m);
+              if (tm.tainted) {
+                defTaint = { source: tm.source ?? "process.env", line: mt.line };
+              }
+              if (tm.endIdx !== undefined && tm.endIdx > m) m = tm.endIdx;
+            }
+          }
+        }
+        if (defTaint && out.length > 0) {
+          out[out.length - 1]!.defaultTaint = defTaint;
+        }
+        k = m;
+        continue;
+      }
+      if (tk.value === "{" || tk.value === "[") {
+        destrDepth++;
+      } else if (tk.value === "}" || tk.value === "]") {
+        destrDepth = Math.max(0, destrDepth - 1);
+      } else if (tk.kind === "ident") {
+        if (destrDepth > 0 && tokens[k + 1]?.value === ":") {
+          k++; // Skip object destructuring property key
+          continue;
+        }
+        out.push({ name: tk.value });
+      }
+    }
+    return out;
+  };
+
+  const CONTROL_PAREN_KEYWORDS = new Set(["if", "while", "for", "switch", "with"]);
+
+  const isUnconditionalStatementStart = (idx: number): boolean => {
+    if (idx === 0) return true;
+    const prev = tokens[idx - 1];
+    if (!prev) return true;
+    if (prev.value === ";" || prev.value === "{" || prev.value === "}") return true;
+    // Braceless control statements: `if (cond) x = ...`, `while (cond) x = ...`, `for (...) x = ...`, `else x = ...`
+    if (prev.value === ")") {
+      const openP = findMatchingOpenParen(idx - 1);
+      if (openP !== -1) {
+        const kw = tokens[openP - 1];
+        if (kw?.kind === "ident" && CONTROL_PAREN_KEYWORDS.has(kw.value)) return false;
+      }
+    }
+    if (prev.kind === "ident" && (prev.value === "else" || prev.value === "do")) return false;
+    if (tokens[idx]!.line > prev.line) {
+      const pv = prev.value;
+      if (
+        pv === "&" ||
+        pv === "|" ||
+        pv === "?" ||
+        pv === ":" ||
+        pv === "," ||
+        pv === "=" ||
+        pv === "(" ||
+        pv === "[" ||
+        pv === "+" ||
+        pv === "-" ||
+        pv === "!" ||
+        pv === "return" ||
+        pv === "throw" ||
+        pv === "case" ||
+        pv === "default"
+      ) {
+        return false;
+      }
+      return true;
+    }
+    return false;
+  };
+
+  interface BraceScopeInfo {
+    kind: "function" | "block";
+    params: ParamBinding[];
+    ownerVarName?: string;
+    ownerDeclKind?: "const" | "let" | "var" | "reassign";
+    ownerIsExported?: boolean;
+    ownerIsDefaultExport?: boolean;
+    ownerLine?: number;
+    isFnDeclaration?: boolean;
+    fnDefIdx?: number;
+  }
+
+  const detectOwnerAssign = (
+    pre: number,
+  ): {
+    ownerVarName?: string;
+    ownerDeclKind?: "const" | "let" | "var" | "reassign";
+    ownerIsExported: boolean;
+    ownerLine?: number;
+  } => {
+    if (pre >= 0 && tokens[pre]?.value === "=" && tokens[pre - 1]?.kind === "ident") {
+      const kw = tokens[pre - 2]?.value;
+      const declK: "const" | "let" | "var" | "reassign" =
+        kw === "const" || kw === "let" || kw === "var"
+          ? kw
+          : kw === "," && currentScope().activeDeclKind
+            ? currentScope().activeDeclKind!
+            : "reassign";
+      const isExp =
+        tokens[pre - 3]?.value === "export" || (kw === "," && currentScope().activeDeclExported);
+      return {
+        ownerVarName: tokens[pre - 1]!.value,
+        ownerDeclKind: declK,
+        ownerIsExported: isExp,
+        ownerLine: tokens[pre - 1]!.line,
+      };
+    }
+    return { ownerIsExported: false };
+  };
+
+  const classifyBraceAt = (braceIdx: number): BraceScopeInfo => {
+    // Arrow function block body: (...) => {  or  x => {
+    if (tokens[braceIdx - 1]?.value === ">" && tokens[braceIdx - 2]?.value === "=") {
+      let params: ParamBinding[] = [];
+      let pre = -1;
+      if (tokens[braceIdx - 3]?.value === ")") {
+        const openP = findMatchingOpenParen(braceIdx - 3);
+        if (openP !== -1) {
+          params = extractParamBindings(openP, braceIdx - 3);
+          pre = openP - 1;
+        }
+      } else if (tokens[braceIdx - 3]?.kind === "ident") {
+        params = [{ name: tokens[braceIdx - 3]!.value }];
+        pre = braceIdx - 4;
+      }
+      if (pre >= 0 && tokens[pre]?.value === "async") pre--;
+      const owner = detectOwnerAssign(pre);
+      return { kind: "function", params, ...owner };
+    }
+
+    // Function / method / catch / control-flow block preceded by `)`
+    if (tokens[braceIdx - 1]?.value === ")") {
+      const openP = findMatchingOpenParen(braceIdx - 1);
+      if (openP === -1) return { kind: "block", params: [] };
+      const before = tokens[openP - 1];
+      if (before?.kind === "ident" && CONTROL_PAREN_KEYWORDS.has(before.value)) {
+        return { kind: "block", params: [] };
+      }
+      if (before?.kind === "ident" && before.value === "catch") {
+        return { kind: "block", params: extractParamBindings(openP, braceIdx - 1) };
+      }
+      if (tokens[openP - 2]?.value === "extends" || tokens[openP - 2]?.value === ".") {
+        return { kind: "block", params: [] };
+      }
+      if (before?.kind === "ident" && before.value === "function") {
+        const params = extractParamBindings(openP, braceIdx - 1);
+        let pre = openP - 2;
+        if (tokens[pre]?.value === "async") pre--;
+        const owner = detectOwnerAssign(pre);
+        if (owner.ownerVarName) {
+          return { kind: "function", params, ...owner };
+        }
+        if (tokens[pre]?.value === "default" && tokens[pre - 1]?.value === "export") {
+          return { kind: "function", params, ownerVarName: "default", ownerIsExported: true, ownerLine: before.line };
+        }
+        return { kind: "function", params };
+      }
+      if (before?.value === "*" && tokens[openP - 2]?.value === "function") {
+        return { kind: "function", params: extractParamBindings(openP, braceIdx - 1) };
+      }
+      // String-keyed or computed object/class methods (including esbuild __commonJS / __esm module bodies)
+      if (before?.kind === "string" || before?.value === "]") {
+        return { kind: "function", params: extractParamBindings(openP, braceIdx - 1) };
+      }
+      if (before?.kind === "ident") {
+        const params = extractParamBindings(openP, braceIdx - 1);
+        const isFnKw =
+          tokens[openP - 2]?.value === "function" ||
+          (tokens[openP - 2]?.value === "*" && tokens[openP - 3]?.value === "function");
+        let ownerVarName: string | undefined;
+        let ownerDeclKind: "const" | "let" | "var" | "reassign" | undefined;
+        let ownerLine: number | undefined;
+        let ownerIsExported = false;
+        let ownerIsDefaultExport = false;
+        let isFnDeclaration = false;
+        let fnDefIdx: number | undefined;
+        if (isFnKw) {
+          const fnKwIdx = tokens[openP - 2]?.value === "function" ? openP - 2 : openP - 3;
+          let pre = fnKwIdx - 1;
+          if (tokens[pre]?.value === "async") pre--;
+          const owner = detectOwnerAssign(pre);
+          if (owner.ownerVarName) {
+            ownerVarName = owner.ownerVarName;
+            ownerDeclKind = owner.ownerDeclKind;
+            ownerLine = owner.ownerLine;
+            ownerIsExported = owner.ownerIsExported;
+          } else {
+            ownerVarName = before.value;
+            ownerLine = before.line;
+            isFnDeclaration = true;
+            fnDefIdx = fnKwIdx;
+            ownerIsDefaultExport = tokens[pre]?.value === "default" && tokens[pre - 1]?.value === "export";
+            ownerIsExported = tokens[pre]?.value === "export" || ownerIsDefaultExport;
+          }
+        }
+        return {
+          kind: "function",
+          params,
+          ownerVarName,
+          ownerDeclKind,
+          ownerIsExported,
+          ownerIsDefaultExport,
+          ownerLine,
+          isFnDeclaration,
+          fnDefIdx,
+        };
+      }
+    }
+
+    return { kind: "block", params: [] };
+  };
+
+  const popExpiredTransientScopes = (
+    curIdx: number,
+    curParen: number,
+    curBracket: number,
+    curBrace: number,
+    tok: JsToken,
+    prevTok: JsToken | undefined,
+  ): void => {
+    while (scopes.length > 1) {
+      const top = scopes[scopes.length - 1]!;
+      if (top.kind === "arrow_expr") {
+        const d = top.arrowDepth!;
+        const belowDepth = curParen < d.paren || curBracket < d.bracket || curBrace < d.brace;
+        const atSameDepth = curParen === d.paren && curBracket === d.bracket && curBrace === d.brace;
+        const delimEnd =
+          atSameDepth && (tok.value === ";" || tok.value === "," || tok.value === ")" || tok.value === "]" || tok.value === "}");
+        const asiEnd =
+          atSameDepth &&
+          prevTok !== undefined &&
+          tok.line > prevTok.line &&
+          prevTok.value !== ">" &&
+          prevTok.value !== "+" &&
+          prevTok.value !== "?" &&
+          prevTok.value !== ":" &&
+          prevTok.value !== "(" &&
+          prevTok.value !== "[" &&
+          prevTok.value !== "," &&
+          prevTok.value !== "." &&
+          prevTok.value !== "&" &&
+          prevTok.value !== "|" &&
+          tok.value !== "." &&
+          tok.value !== "?" &&
+          tok.value !== ":" &&
+          tok.value !== "+" &&
+          tok.value !== "&" &&
+          tok.value !== "|";
+        if (belowDepth || delimEnd || asiEnd) {
+          scopes.pop();
+          continue;
+        }
+      } else if (top.kind === "for_stmt") {
+        const afterP = top.forStmtAfterParen!;
+        if (curIdx > afterP) {
+          const d = top.forStmtDepth!;
+          const belowDepth = curParen < d.paren || curBracket < d.bracket || curBrace < d.brace;
+          const atSameDepth = curParen === d.paren && curBracket === d.bracket && curBrace === d.brace;
+          const endedBySemi = curIdx > afterP + 1 && atSameDepth && prevTok?.value === ";";
+          const endedByCloseBrace = atSameDepth && tok.value === "}";
+          const asiEnd =
+            curIdx > afterP + 1 &&
+            atSameDepth &&
+            prevTok !== undefined &&
+            tok.line > prevTok.line &&
+            prevTok.value !== "+" &&
+            prevTok.value !== "?" &&
+            prevTok.value !== ":" &&
+            prevTok.value !== "," &&
+            prevTok.value !== "=" &&
+            prevTok.value !== "&" &&
+            prevTok.value !== "|" &&
+            prevTok.value !== ".";
+          if (belowDepth || endedBySemi || endedByCloseBrace || asiEnd) {
+            scopes.pop();
+            continue;
+          }
+        }
+      }
+      break;
+    }
+  };
+
+  let loopParenDepth = 0;
+  let loopBracketDepth = 0;
+  let loopBraceDepth = 0;
+  const mergedBraceIndices = new Set<number>();
+  let skipReAssignUntil = -1;
+
   for (let i = 0; i < tokens.length; i++) {
+    const prevTok = tokens[i - 1];
     const t = tokens[i]!;
     const t1 = tokens[i + 1];
     const t2 = tokens[i + 2];
     const t3 = tokens[i + 3];
+
+    // 7a. Maintain lexical block/function/arrow-expression/for-statement scopes & delimiter depths
+    popExpiredTransientScopes(i, loopParenDepth, loopBracketDepth, loopBraceDepth, t, prevTok);
+
+    const curFrame = currentScope();
+    if (curFrame.activeDeclKind !== null) {
+      const d = curFrame.activeDeclDepth;
+      const belowDeclDepth = loopParenDepth < d.paren || loopBracketDepth < d.bracket || loopBraceDepth < d.brace;
+      const atDeclDepth = loopParenDepth === d.paren && loopBracketDepth === d.bracket && loopBraceDepth === d.brace;
+      const asiDeclEnd =
+        atDeclDepth &&
+        prevTok !== undefined &&
+        t.line > prevTok.line &&
+        prevTok.value !== "," &&
+        prevTok.value !== "=" &&
+        prevTok.value !== "const" &&
+        prevTok.value !== "let" &&
+        prevTok.value !== "var" &&
+        prevTok.value !== "+" &&
+        prevTok.value !== "?" &&
+        prevTok.value !== ":" &&
+        prevTok.value !== "&" &&
+        prevTok.value !== "|" &&
+        t.value !== "," &&
+        t.value !== "=";
+      if (belowDeclDepth || (atDeclDepth && (t.value === ";" || t.value === "}")) || asiDeclEnd) {
+        curFrame.activeDeclKind = null;
+        curFrame.activeDeclExported = false;
+      }
+    }
+
+    if (t.kind === "ident" && t.value === "for" && t1?.value === "(") {
+      const closeP = findMatchingCloseParen(i + 1);
+      if (closeP !== -1) {
+        if (tokens[closeP + 1]?.value === "{") {
+          scopes.push(makeScope("block"));
+          mergedBraceIndices.add(closeP + 1);
+        } else {
+          const forFrame = makeScope("for_stmt");
+          forFrame.forStmtAfterParen = closeP;
+          forFrame.forStmtDepth = { paren: loopParenDepth, bracket: loopBracketDepth, brace: loopBraceDepth };
+          scopes.push(forFrame);
+        }
+      }
+    }
+
+    if (t.value === "(") {
+      const closeP = findMatchingCloseParen(i);
+      if (closeP !== -1) {
+        const afterClose = tokens[closeP + 1]?.value;
+        const afterClose2 = tokens[closeP + 2]?.value;
+        const beforeOpen = tokens[i - 1];
+        const isParamList =
+          (afterClose === "=" && afterClose2 === ">") ||
+          (afterClose === "{" &&
+            !(beforeOpen?.kind === "ident" && CONTROL_PAREN_KEYWORDS.has(beforeOpen.value)) &&
+            tokens[i - 2]?.value !== "extends" &&
+            tokens[i - 2]?.value !== ".");
+        if (isParamList) {
+          skipReAssignUntil = Math.max(skipReAssignUntil, closeP);
+        }
+      }
+      loopParenDepth++;
+    } else if (t.value === ")") {
+      loopParenDepth = Math.max(0, loopParenDepth - 1);
+    } else if (t.value === "[") {
+      loopBracketDepth++;
+    } else if (t.value === "]") {
+      loopBracketDepth = Math.max(0, loopBracketDepth - 1);
+    } else if (t.value === "=" && t1?.value === ">" && t2?.value !== "{") {
+      let arrowParams: ParamBinding[] = [];
+      if (tokens[i - 1]?.value === ")") {
+        const openP = findMatchingOpenParen(i - 1);
+        if (openP !== -1) arrowParams = extractParamBindings(openP, i - 1);
+      } else if (tokens[i - 1]?.kind === "ident") {
+        arrowParams = [{ name: tokens[i - 1]!.value }];
+      }
+      const arrowFrame = makeScope("arrow_expr");
+      arrowFrame.arrowDepth = { paren: loopParenDepth, bracket: loopBracketDepth, brace: loopBraceDepth };
+      for (const p of arrowParams) {
+        if (p.defaultTaint) {
+          arrowFrame.declaredVars.add(p.name);
+          arrowFrame.taintedVars.set(p.name, p.defaultTaint);
+          arrowFrame.sinkAliases.set(p.name, null);
+        } else {
+          bindCleanInFrame(arrowFrame, p.name);
+        }
+      }
+      scopes.push(arrowFrame);
+    } else if (t.value === "{") {
+      loopBraceDepth++;
+      if (mergedBraceIndices.has(i)) {
+        mergedBraceIndices.delete(i);
+      } else {
+        const info = classifyBraceAt(i);
+        const enclosing = currentScope();
+        const frame = makeScope(info.kind);
+        if (info.ownerVarName) {
+          frame.ownerVarName = info.ownerVarName;
+          frame.ownerFrame =
+            info.ownerDeclKind === "var"
+              ? currentFunctionOrRootScope()
+              : info.ownerDeclKind === "reassign"
+                ? (findDeclaredScope(info.ownerVarName) ?? currentFunctionOrRootScope())
+                : enclosing;
+          frame.ownerIsExported = info.ownerIsExported;
+          frame.ownerIsDefaultExport = info.ownerIsDefaultExport;
+          frame.ownerLine = info.ownerLine;
+          if (info.isFnDeclaration) {
+            const fnWrapperKind =
+              info.fnDefIdx !== undefined ? lookupPrepassSinkDefAt(info.ownerVarName, info.fnDefIdx) : null;
+            bindCleanInFrame(enclosing, info.ownerVarName, fnWrapperKind);
+          }
+        }
+        for (const p of info.params) {
+          if (p.defaultTaint) {
+            frame.declaredVars.add(p.name);
+            frame.taintedVars.set(p.name, p.defaultTaint);
+            frame.sinkAliases.set(p.name, null);
+          } else {
+            bindCleanInFrame(frame, p.name);
+          }
+        }
+        scopes.push(frame);
+      }
+    } else if (t.value === "}") {
+      loopBraceDepth = Math.max(0, loopBraceDepth - 1);
+      while (
+        scopes.length > 1 &&
+        (scopes[scopes.length - 1]!.kind === "arrow_expr" || scopes[scopes.length - 1]!.kind === "for_stmt")
+      ) {
+        scopes.pop();
+      }
+      if (scopes.length > 1) {
+        const popped = scopes.pop()!;
+        if (popped.kind === "function" && popped.returnsTaint && popped.ownerVarName && popped.ownerFrame) {
+          popped.ownerFrame.taintedVars.set(popped.ownerVarName, popped.returnsTaint);
+          if (popped.ownerIsExported) {
+            const expNames = popped.ownerIsDefaultExport ? [popped.ownerVarName, "default"] : [popped.ownerVarName];
+            for (const expNm of expNames) {
+              if (!exportedTainted.some((e) => e.name === expNm && e.source === popped.returnsTaint!.source)) {
+                exportedTainted.push({
+                  name: expNm,
+                  source: popped.returnsTaint.source,
+                  line: popped.ownerLine ?? popped.returnsTaint.line,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Track `return <expr>` inside a function scope so functions returning tainted values propagate taint
+    if (t.kind === "ident" && t.value === "return" && isNotMemberProp(i)) {
+      const fnScope = currentFunctionOrRootScope();
+      if (fnScope.kind === "function" && !fnScope.returnsTaint) {
+        let rParen = 0;
+        let rBracket = 0;
+        let rBrace = 0;
+        for (let k = i + 1; k < Math.min(tokens.length, i + 40); k++) {
+          const rk = tokens[k]!;
+          if (rk.value === "(") rParen++;
+          else if (rk.value === ")") {
+            if (rParen === 0) break;
+            rParen--;
+          } else if (rk.value === "[") rBracket++;
+          else if (rk.value === "]") {
+            if (rBracket === 0) break;
+            rBracket--;
+          } else if (rk.value === "{") {
+            if (classifyBraceAt(k).kind === "function") break;
+            rBrace++;
+          } else if (rk.value === "}") {
+            if (rBrace === 0) break;
+            rBrace--;
+          } else if (rk.value === ";" && rParen === 0 && rBracket === 0 && rBrace === 0) {
+            break;
+          }
+          if (k > i + 1 && rParen === 0 && rBracket === 0 && rBrace === 0 && rk.line > tokens[k - 1]!.line) {
+            const pval = tokens[k - 1]!.value;
+            if (pval !== "+" && pval !== "?" && pval !== ":" && pval !== "&" && pval !== "|" && pval !== "return") {
+              break;
+            }
+          }
+          if ((rk.kind === "string" && matchesCredPattern(rk.value) !== null) || matchJoinedCredPathAt(k) !== null) {
+            fnScope.returnsTaint = { source: "credential_file", line: t.line };
+            break;
+          }
+          const rt = getTaintAt(k);
+          if (rt.tainted) {
+            fnScope.returnsTaint = { source: rt.source ?? "process.env", line: rt.line ?? t.line };
+            break;
+          }
+          if (rt.endIdx !== undefined && rt.endIdx > k) k = rt.endIdx;
+        }
+      }
+    }
 
     // Unicode-escaped sensitive identifier (e.g., ev\u0061l, pro\u0063ess)
     if (t.kind === "ident" && t.hadUnicodeEscape && SENSITIVE_ESCAPED_IDENTS.has(t.value)) {
@@ -1916,6 +3022,7 @@ export function analyzeSourceBlob(
         if (tokens[i + 2]?.value === "(") {
           let bDepth = 0;
           const bArgs: string[] = [];
+          let bTaintHit = false;
           for (let k = i + 2; k < Math.min(tokens.length, i + 64); k++) {
             const bt = tokens[k]!;
             if (bt.value === "(") bDepth++;
@@ -1925,19 +3032,23 @@ export function analyzeSourceBlob(
             } else if (bt.kind === "string") {
               bArgs.push(bt.value);
             } else if (bt.kind === "ident" && isNotMemberProp(k)) {
-              const sv = stringVars.get(bt.value);
+              const sv = lookupStringVar(bt.value);
               if (sv) bArgs.push(sv);
-              const tv = taintedVars.get(bt.value);
-              if (tv) {
-                observations.push({
-                  code: "TAINT_CRED_TO_NETWORK_OR_EXEC",
-                  severity: "CRITICAL",
-                  path: filePath,
-                  line: t.line,
-                  digest_sha256: sha256,
-                  attack_id: "T1059.007",
-                  detail: `Tainted identifier '${bt.value}' flows into computed child_process sink '["${val}"]()' at '${filePath}:${t.line}'.`,
-                });
+              if (!bTaintHit) {
+                const tm = getTaintAt(k);
+                if (tm.tainted) {
+                  bTaintHit = true;
+                  observations.push({
+                    code: "TAINT_CRED_TO_NETWORK_OR_EXEC",
+                    severity: "CRITICAL",
+                    path: filePath,
+                    line: t.line,
+                    digest_sha256: sha256,
+                    attack_id: "T1059.007",
+                    detail: `Tainted identifier '${bt.value}' flows into computed child_process sink '["${val}"]()' at '${filePath}:${t.line}'.`,
+                  });
+                }
+                if (tm.endIdx !== undefined && tm.endIdx > k) k = tm.endIdx;
               }
             }
           }
@@ -2024,7 +3135,7 @@ export function analyzeSourceBlob(
 
     // Computed bracket lookup via constant string variable: const fn = "ev" + "al"; globalThis[fn](...)
     if (t.kind === "ident" && tokens[i - 1]?.value === "[" && tokens[i + 1]?.value === "]" && isComputedBracketAt(i - 1)) {
-      const resolvedKey = stringVars.get(t.value);
+      const resolvedKey = lookupStringVar(t.value);
       if (
         resolvedKey === "eval" ||
         resolvedKey === "Function" ||
@@ -2051,28 +3162,32 @@ export function analyzeSourceBlob(
 
     // Dynamic import(expr) & data:/HTTP(S) dynamic import() evasion defense (skip class/object method defs `import(x) { ... }`)
     if (t.kind === "ident" && t.value === "import" && t1?.value === "(" && isNotMemberProp(i)) {
-      const inner: JsToken[] = [];
+      const innerIndices: number[] = [];
       let dDepth = 0;
       let closeParenIdx = -1;
       for (let k = i + 1; k < Math.min(tokens.length, i + 64); k++) {
         const dt = tokens[k]!;
         if (dt.value === "(") {
           dDepth++;
-          if (dDepth > 1) inner.push(dt);
+          if (dDepth > 1) innerIndices.push(k);
         } else if (dt.value === ")") {
           dDepth--;
           if (dDepth <= 0) {
             closeParenIdx = k;
             break;
           }
-          inner.push(dt);
+          innerIndices.push(k);
         } else {
-          inner.push(dt);
+          innerIndices.push(k);
         }
       }
-      const isMethodDef = closeParenIdx !== -1 && tokens[closeParenIdx + 1]?.value === "{";
-      if (!isMethodDef && inner.length === 1 && inner[0]?.kind === "string") {
-        const specVal = inner[0].value;
+      const isMethodDef =
+        closeParenIdx !== -1 &&
+        tokens[closeParenIdx + 1]?.value === "{" &&
+        tokens[closeParenIdx + 1]!.line === tokens[closeParenIdx]!.line;
+      const firstInner = innerIndices.length === 1 ? tokens[innerIndices[0]!] : undefined;
+      if (!isMethodDef && firstInner?.kind === "string") {
+        const specVal = firstInner.value;
         if (/^(?:data:|https?:\/\/)/i.test(specVal)) {
           has_obfuscation = true;
           hasExecSink = true;
@@ -2087,8 +3202,8 @@ export function analyzeSourceBlob(
             detail: `Dynamic import() loads executable data:/HTTP(S) URL at '${filePath}:${t.line}'.`,
           });
         }
-      } else if (!isMethodDef && inner.length > 0) {
-        const boundSpec = inner.length === 1 && inner[0]?.kind === "ident" ? stringVars.get(inner[0].value) : undefined;
+      } else if (!isMethodDef && innerIndices.length > 0) {
+        const boundSpec = firstInner?.kind === "ident" ? lookupStringVar(firstInner.value) : undefined;
         const isCriticalSpec = Boolean(
           boundSpec &&
             (/^(?:data:|https?:\/\/)/i.test(boundSpec) ||
@@ -2109,8 +3224,11 @@ export function analyzeSourceBlob(
             ? `Obfuscated dynamic import() resolves to '${sanitizeUntrustedText(boundSpec!, 48)}' at '${filePath}:${t.line}'.`
             : `Computed dynamic import(expr) cannot be statically verified at '${filePath}:${t.line}'.`,
         });
-        for (const itok of inner) {
-          if (itok.kind === "ident" && taintedVars.has(itok.value)) {
+        for (let idxPos = 0; idxPos < innerIndices.length; idxPos++) {
+          const origIdx = innerIndices[idxPos]!;
+          const itok = tokens[origIdx]!;
+          const tm = getTaintAt(origIdx);
+          if (tm.tainted) {
             observations.push({
               code: "TAINT_CRED_TO_NETWORK_OR_EXEC",
               severity: "CRITICAL",
@@ -2122,6 +3240,9 @@ export function analyzeSourceBlob(
             });
             break;
           }
+          if (tm.endIdx !== undefined && tm.endIdx > origIdx) {
+            while (idxPos + 1 < innerIndices.length && innerIndices[idxPos + 1]! <= tm.endIdx) idxPos++;
+          }
         }
       }
     }
@@ -2129,7 +3250,7 @@ export function analyzeSourceBlob(
     // Obfuscated dynamic require(var) / req(var) resolving to child_process or vm
     if (t.kind === "ident" && requireAliases.has(t.value) && t1?.value === "(" && isNotMemberProp(i)) {
       if (t2?.kind === "ident" && t3?.value === ")") {
-        const resolvedMod = stringVars.get(t2.value);
+        const resolvedMod = lookupStringVar(t2.value);
         if (resolvedMod && (CHILD_PROCESS_SPECS.has(resolvedMod) || VM_SPECS.has(resolvedMod))) {
           has_obfuscation = true;
           hasExecSink = true;
@@ -2155,7 +3276,7 @@ export function analyzeSourceBlob(
       const a1 = tokens[reflectDot + 3];
       const a2 = tokens[reflectDot + 4];
       if (rMethod === "get" && a0?.kind === "ident" && GLOBAL_OBJ_NAMES.has(a0.value) && a1?.value === "," && a2) {
-        const keyVal = a2.kind === "string" ? a2.value : a2.kind === "ident" ? stringVars.get(a2.value) : undefined;
+        const keyVal = a2.kind === "string" ? a2.value : a2.kind === "ident" ? lookupStringVar(a2.value) : undefined;
         if (keyVal === "eval" || keyVal === "Function") {
           has_obfuscation = true;
           hasExecSink = true;
@@ -2176,18 +3297,13 @@ export function analyzeSourceBlob(
         if (a0Dot !== -1 && tokens[a0Dot]?.kind === "ident") {
           targetName = tokens[a0Dot]!.value;
         }
+        const effSink = lookupEffectiveSink(targetName, i);
         const targetKind =
-          DYNAMIC_EXEC_SINKS.has(targetName) ||
-          sinkAliases.get(targetName) === "dynamic_exec" ||
-          wrapperSinks.get(targetName) === "dynamic_exec"
+          DYNAMIC_EXEC_SINKS.has(targetName) || effSink === "dynamic_exec"
             ? "dynamic_exec"
-            : CHILD_EXEC_SINKS.has(targetName) ||
-                sinkAliases.get(targetName) === "child_exec" ||
-                wrapperSinks.get(targetName) === "child_exec"
+            : CHILD_EXEC_SINKS.has(targetName) || effSink === "child_exec"
               ? "child_exec"
-              : DIRECT_NET_SINKS.has(targetName) ||
-                  sinkAliases.get(targetName) === "network" ||
-                  wrapperSinks.get(targetName) === "network"
+              : DIRECT_NET_SINKS.has(targetName) || effSink === "network"
                 ? "network"
                 : null;
         if (targetKind === "dynamic_exec") {
@@ -2223,12 +3339,11 @@ export function analyzeSourceBlob(
             } else if (rt.kind === "string") {
               rStrArgs.push(rt.value);
             } else if (rt.kind === "ident" && isNotMemberProp(k)) {
-              const sv = stringVars.get(rt.value);
+              const sv = lookupStringVar(rt.value);
               if (sv) rStrArgs.push(sv);
               if (!rTaint) {
-                const tv = taintedVars.get(rt.value);
-                const envM = matchProcessEnvAt(k);
-                if (tv || (envM.matched && !(envM.propName && BENIGN_ENV_VARS.has(envM.propName)))) {
+                const tm = getTaintAt(k);
+                if (tm.tainted) {
                   rTaint = true;
                   observations.push({
                     code: "TAINT_CRED_TO_NETWORK_OR_EXEC",
@@ -2240,6 +3355,7 @@ export function analyzeSourceBlob(
                     detail: `Tainted data flows into Reflect.${rMethod}(${targetName}, ...) at '${filePath}:${t.line}'.`,
                   });
                 }
+                if (tm.endIdx !== undefined && tm.endIdx > k) k = tm.endIdx;
               }
             }
           }
@@ -2273,33 +3389,117 @@ export function analyzeSourceBlob(
       });
     }
 
-    // Track variable declarations and reassignments (multi-hop taint, process/env aliases, constant string concat, sink aliases)
-    const isDeclAssign =
+    // Track declaration-list keywords (`const`, `let`, `var`) per scope frame for scoped bindings & comma-separated lists
+    const isDeclKw = t.kind === "ident" && (t.value === "const" || t.value === "let" || t.value === "var") && isNotMemberProp(i);
+    if (isDeclKw) {
+      curFrame.activeDeclKind = t.value as "const" | "let" | "var";
+      curFrame.activeDeclDepth = { paren: loopParenDepth, bracket: loopBracketDepth, brace: loopBraceDepth };
+      curFrame.activeDeclExported = tokens[i - 1]?.kind === "ident" && tokens[i - 1]?.value === "export";
+      curFrame.activeDeclUnconditional = isUnconditionalStatementStart(i);
+    }
+    const atActiveDeclDepth =
+      curFrame.activeDeclKind !== null &&
+      loopParenDepth === curFrame.activeDeclDepth.paren &&
+      loopBracketDepth === curFrame.activeDeclDepth.bracket &&
+      loopBraceDepth === curFrame.activeDeclDepth.brace;
+
+    // Uninitialized declarations (`let x;`, `var env2, isColor;`) and `for (const x of/in iterable)`
+    const isStartDeclNoInit = isDeclKw && t1?.kind === "ident" && t2?.value !== "=";
+    const isCommaDeclNoInit =
+      !isDeclKw &&
+      atActiveDeclDepth &&
+      tokens[i - 1]?.value === "," &&
       t.kind === "ident" &&
-      (t.value === "const" || t.value === "let" || t.value === "var") &&
+      t1?.value !== "=";
+    if (isStartDeclNoInit || isCommaDeclNoInit) {
+      const varName = isStartDeclNoInit ? t1!.value : t.value;
+      const declKind = isStartDeclNoInit ? (t.value as "const" | "let" | "var") : curFrame.activeDeclKind!;
+      const declFrame = declKind === "var" ? currentFunctionOrRootScope() : currentScope();
+      let forOfTaint: TaintEntry | undefined;
+      if (isStartDeclNoInit && t2?.kind === "ident" && (t2.value === "of" || t2.value === "in")) {
+        for (let k = i + 3; k < Math.min(tokens.length, i + 28); k++) {
+          const fk = tokens[k]!;
+          if (fk.value === ")" || fk.value === ";") break;
+          const tm = getTaintAt(k);
+          if (tm.tainted) {
+            forOfTaint = { source: tm.source ?? "process.env", line: t.line };
+            break;
+          }
+          if (tm.endIdx !== undefined && tm.endIdx > k) k = tm.endIdx;
+        }
+      }
+      if (forOfTaint) {
+        declFrame.declaredVars.add(varName);
+        declFrame.taintedVars.set(varName, forOfTaint);
+      } else if (declFrame === currentScope() && (declKind !== "var" || curFrame.activeDeclUnconditional)) {
+        bindCleanInFrame(declFrame, varName);
+      } else {
+        declFrame.declaredVars.add(varName);
+      }
+    }
+
+    // Track variable declarations and reassignments (lexically scoped, multi-hop taint, process/env aliases,
+    // constant string concat, scoped sink aliases, and clean-redeclaration kill)
+    const isStartDeclAssign =
+      isDeclKw &&
       t1?.kind === "ident" &&
       t2?.value === "=" &&
-      t3?.value !== "=";
+      t3?.value !== "=" &&
+      t3?.value !== ">";
+    const isCommaDeclAssign =
+      !isDeclKw &&
+      atActiveDeclDepth &&
+      tokens[i - 1]?.value === "," &&
+      t.kind === "ident" &&
+      t1?.value === "=" &&
+      t2?.value !== "=" &&
+      t2?.value !== ">";
+    const isDeclAssign = isStartDeclAssign || isCommaDeclAssign;
     const isReAssign =
       !isDeclAssign &&
+      i > skipReAssignUntil &&
       t.kind === "ident" &&
       isNotMemberProp(i) &&
       tokens[i - 1]?.value !== "const" &&
       tokens[i - 1]?.value !== "let" &&
       tokens[i - 1]?.value !== "var" &&
       t1?.value === "=" &&
-      t2?.value !== "=";
+      t2?.value !== "=" &&
+      t2?.value !== ">";
 
     if (isDeclAssign || isReAssign) {
-      const varName = isDeclAssign ? t1!.value : t.value;
-      const rhsStart = isDeclAssign ? i + 3 : i + 2;
-      const isExportedDecl = isDeclAssign && tokens[i - 1]?.kind === "ident" && tokens[i - 1]?.value === "export";
+      const varName = isStartDeclAssign ? t1!.value : t.value;
+      const rhsStart = isStartDeclAssign ? i + 3 : i + 2;
+      const declKind = isStartDeclAssign
+        ? (t.value as "const" | "let" | "var")
+        : isCommaDeclAssign
+          ? curFrame.activeDeclKind
+          : null;
+      const isExportedDecl =
+        (isStartDeclAssign && tokens[i - 1]?.kind === "ident" && tokens[i - 1]?.value === "export") ||
+        (isCommaDeclAssign && curFrame.activeDeclExported);
       const rhs0 = tokens[rhsStart];
       const rhs1 = tokens[rhsStart + 1];
 
-      // Track single-string and constant-concatenation string bindings (ASI-safe): `const fn = a + b` / `const c = "curl ..."`
+      const declFrame =
+        declKind === "const" || declKind === "let"
+          ? currentScope()
+          : declKind === "var"
+            ? currentFunctionOrRootScope()
+            : (findDeclaredScope(varName) ?? currentFunctionOrRootScope());
+      const canKillInTarget =
+        declKind === "const" || declKind === "let"
+          ? declFrame === currentScope()
+          : declKind === "var"
+            ? declFrame === currentScope() && curFrame.activeDeclUnconditional
+            : declFrame === currentScope() &&
+              loopParenDepth === 0 &&
+              loopBracketDepth === 0 &&
+              isUnconditionalStatementStart(i);
+
+      // Evaluate constant string binding BEFORE modifying target frame
+      let resolvedStr: string | null = null;
       if (rhs0) {
-        let resolvedStr: string | null = null;
         let curIdx = rhsStart;
         let partsOk = true;
         let partCount = 0;
@@ -2309,8 +3509,13 @@ export function analyzeSourceBlob(
           let piece: string | undefined;
           if (curTok.kind === "string") {
             piece = curTok.value;
-          } else if (curTok.kind === "ident" && stringVars.has(curTok.value)) {
-            piece = stringVars.get(curTok.value);
+          } else if (curTok.kind === "ident") {
+            const sv = lookupStringVar(curTok.value);
+            if (sv !== undefined) piece = sv;
+            else {
+              partsOk = false;
+              break;
+            }
           } else {
             partsOk = false;
             break;
@@ -2329,45 +3534,26 @@ export function analyzeSourceBlob(
           }
           break;
         }
-        if (partsOk && partCount > 0 && resolvedStr !== null) {
-          stringVars.set(varName, resolvedStr);
-        }
+        if (!partsOk || partCount === 0) resolvedStr = null;
       }
 
-      // Track process aliases (ASI-safe & optional-chaining-safe): const p = process / globalThis.process / Reflect.get(globalThis, "process")
-      const pDot = rhs0?.kind === "ident" && GLOBAL_OBJ_NAMES.has(rhs0.value) ? matchDotPropIdx(rhsStart + 1) : -1;
-      const pBr = rhs0?.kind === "ident" && GLOBAL_OBJ_NAMES.has(rhs0.value) ? matchOptBracketIdx(rhsStart + 1) : -1;
-      if (
-        (rhs0?.kind === "ident" && processAliases.has(rhs0.value) && isStmtEnd(rhs0, rhs1)) ||
-        (pDot !== -1 && tokens[pDot]?.value === "process" && isStmtEnd(tokens[pDot]!, tokens[pDot + 1])) ||
-        (pBr !== -1 &&
-          tokens[pBr + 1]?.kind === "string" &&
-          tokens[pBr + 1]?.value === "process" &&
-          tokens[pBr + 2]?.value === "]" &&
-          isStmtEnd(tokens[pBr + 2]!, tokens[pBr + 3])) ||
-        (rhs0?.value === "Reflect" &&
-          rhs1?.value === "." &&
-          tokens[rhsStart + 2]?.value === "get" &&
-          tokens[rhsStart + 3]?.value === "(" &&
-          GLOBAL_OBJ_NAMES.has(tokens[rhsStart + 4]?.value ?? "") &&
-          tokens[rhsStart + 5]?.value === "," &&
-          tokens[rhsStart + 6]?.kind === "string" &&
-          tokens[rhsStart + 6]?.value === "process")
-      ) {
-        processAliases.add(varName);
-      }
+      // Evaluate process alias BEFORE modifying target frame
+      const procMatch = matchProcessObjAt(rhsStart);
+      const isProcAliasRhs =
+        procMatch.matched && isStmtEnd(tokens[procMatch.endIdx]!, tokens[procMatch.endIdx + 1]);
 
-      // Track direct sink aliases (ASI-safe + .bind() + never alias call return values): const f = fetch; const r = eval.bind(null);
+      // Track scoped sink aliases (ASI-safe + .bind() + prepass wrappers/imports + never alias call return values)
+      let rhsSinkAlias: SinkKind | null = isStartDeclAssign ? lookupPrepassSinkDefAt(varName, i) : null;
       if (
+        !rhsSinkAlias &&
         rhs0?.kind === "ident" &&
         (isStmtEnd(rhs0, rhs1) || (rhs1?.value === "." && tokens[rhsStart + 2]?.value === "bind" && tokens[rhsStart + 3]?.value === "("))
       ) {
-        if (DIRECT_NET_SINKS.has(rhs0.value)) sinkAliases.set(varName, "network");
-        else if (CHILD_EXEC_SINKS.has(rhs0.value)) sinkAliases.set(varName, "child_exec");
-        else if (DYNAMIC_EXEC_SINKS.has(rhs0.value)) sinkAliases.set(varName, "dynamic_exec");
-        else if (sinkAliases.has(rhs0.value)) sinkAliases.set(varName, sinkAliases.get(rhs0.value)!);
-        else if (wrapperSinks.has(rhs0.value)) sinkAliases.set(varName, wrapperSinks.get(rhs0.value)!);
-      } else if (rhs0?.kind === "ident") {
+        if (DIRECT_NET_SINKS.has(rhs0.value)) rhsSinkAlias = "network";
+        else if (CHILD_EXEC_SINKS.has(rhs0.value)) rhsSinkAlias = "child_exec";
+        else if (DYNAMIC_EXEC_SINKS.has(rhs0.value)) rhsSinkAlias = "dynamic_exec";
+        else rhsSinkAlias = lookupEffectiveSink(rhs0.value, rhsStart);
+      } else if (!rhsSinkAlias && rhs0?.kind === "ident") {
         const mDot = matchDotPropIdx(rhsStart + 1);
         const mTok = mDot !== -1 ? tokens[mDot] : undefined;
         const afterM = mDot !== -1 ? tokens[mDot + 1] : undefined;
@@ -2377,142 +3563,527 @@ export function analyzeSourceBlob(
           (isStmtEnd(mTok, afterM) || (afterM?.value === "." && tokens[mDot + 2]?.value === "bind" && tokens[mDot + 3]?.value === "("))
         ) {
           const meth = mTok.value;
-          if (CHILD_EXEC_SINKS.has(meth) && !regexVars.has(rhs0.value)) sinkAliases.set(varName, "child_exec");
+          if (CHILD_EXEC_SINKS.has(meth) && !regexVars.has(rhs0.value)) rhsSinkAlias = "child_exec";
           else if (DYNAMIC_EXEC_SINKS.has(meth) && (GLOBAL_OBJ_NAMES.has(rhs0.value) || vmNamespaces.has(rhs0.value) || meth !== "eval")) {
-            sinkAliases.set(varName, "dynamic_exec");
+            rhsSinkAlias = "dynamic_exec";
           } else if (
             dynamicNetworkReceivers.has(rhs0.value.toLowerCase()) &&
             (DIRECT_NET_SINKS.has(meth) || QUALIFIED_NET_METHODS.has(meth))
           ) {
-            sinkAliases.set(varName, "network");
+            rhsSinkAlias = "network";
           }
         }
       }
 
       // Propagate imported binding across 1-hop assignment: const x = importedSecret; / const x = getSecret();
-      if (rhs0?.kind === "ident" && importedBindings.has(rhs0.value)) {
+      if (rhs0?.kind === "ident" && importedBindings.has(rhs0.value) && !isShadowedLocally(rhs0.value)) {
         importedBindings.set(varName, importedBindings.get(rhs0.value)!);
-      } else if (rhs0?.kind === "ident" && importedNamespaces.has(rhs0.value) && rhs1?.value === "." && tokens[rhsStart + 2]?.kind === "ident") {
+      } else if (
+        rhs0?.kind === "ident" &&
+        importedNamespaces.has(rhs0.value) &&
+        !isShadowedLocally(rhs0.value) &&
+        rhs1?.value === "." &&
+        tokens[rhsStart + 2]?.kind === "ident"
+      ) {
         importedBindings.set(varName, { from: importedNamespaces.get(rhs0.value)!, importedName: tokens[rhsStart + 2]!.value });
       }
 
-      // Check direct whole-env alias assignment (ASI-safe): const e = process.env / const e = Reflect.get(process, "env")
-      const directEnv = matchProcessEnvAt(rhsStart);
-      if (
-        directEnv.matched &&
-        !directEnv.propName &&
-        directEnv.endIdx !== undefined &&
-        isStmtEnd(tokens[directEnv.endIdx]!, tokens[directEnv.endIdx + 1])
-      ) {
-        envAliases.add(varName);
-      }
-
-      let rhsHasEnv = false;
-      let rhsOnlyBenignEnv = true;
-      let rhsHasCred = false;
-      let rhsTaintSource: string | null = null;
-      let parenDepth = 0;
-
-      for (let k = rhsStart; k < Math.min(tokens.length, rhsStart + 40); k++) {
-        const tk = tokens[k]!;
-        if (tk.value === "(") parenDepth++;
-        else if (tk.value === ")") parenDepth = Math.max(0, parenDepth - 1);
-        else if ((tk.value === ";" || tk.value === "}") && parenDepth === 0) break;
-        if (
-          k > rhsStart &&
-          parenDepth === 0 &&
-          tk.line > tokens[k - 1]!.line &&
-          tk.kind === "ident" &&
-          (tk.value === "const" || tk.value === "let" || tk.value === "var" || tk.value === "function" || tk.value === "return" || tk.value === "export" || tk.value === "import")
-        ) {
+      // Scan RHS expression (stopping at `;`, top-level `,`, closing `}` / `)` / `]`, statement boundary,
+      // or function body `{`, so esbuild `__commonJS`/`__esm` bodies and comma lists never bleed taint).
+      // For block-body function/arrow expressions (`function(p) { ... }`, `(p) => { ... }`), do not scan
+      // parameter lists as outer reads — their own scope + `returnsTaint` handle propagation.
+      // For chained expression-body arrows (`(a) => (b) => expr`), exclude all chained arrow params.
+      const rhsShadowedParams = new Set<string>();
+      const rhsDefaultTaintedParams = new Map<string, TaintEntry>();
+      let rhsScanStart = rhsStart;
+      let rhsIsBlockFunction = false;
+      {
+        let fnCheck = rhsStart;
+        while (fnCheck < tokens.length) {
+          let step = fnCheck;
+          if (tokens[step]?.value === "async") step++;
+          if (tokens[step]?.value === "function") {
+            rhsIsBlockFunction = true;
+            break;
+          }
+          if (tokens[step]?.value === "(") {
+            const closeP = findMatchingCloseParen(step);
+            if (closeP !== -1 && tokens[closeP + 1]?.value === "=" && tokens[closeP + 2]?.value === ">") {
+              if (tokens[closeP + 3]?.value === "{") {
+                rhsIsBlockFunction = true;
+                break;
+              }
+              for (const p of extractParamBindings(step, closeP)) {
+                if (p.defaultTaint) rhsDefaultTaintedParams.set(p.name, p.defaultTaint);
+                else rhsShadowedParams.add(p.name);
+              }
+              fnCheck = closeP + 3;
+              rhsScanStart = fnCheck;
+              continue;
+            }
+          } else if (
+            tokens[step]?.kind === "ident" &&
+            tokens[step + 1]?.value === "=" &&
+            tokens[step + 2]?.value === ">"
+          ) {
+            if (tokens[step + 3]?.value === "{") {
+              rhsIsBlockFunction = true;
+              break;
+            }
+            rhsShadowedParams.add(tokens[step]!.value);
+            fnCheck = step + 3;
+            rhsScanStart = fnCheck;
+            continue;
+          }
           break;
         }
+      }
 
-        const envMatch = matchProcessEnvAt(k);
-        if (envMatch.matched) {
-          rhsHasEnv = true;
-          if (!envMatch.propName || !BENIGN_ENV_VARS.has(envMatch.propName)) {
-            rhsOnlyBenignEnv = false;
+      let rhsHasCred = false;
+      let rhsTaintSource: string | null = null;
+      let rhsDirectWholeEnv = false;
+      let parenDepth = 0;
+      let bracketDepth = 0;
+      let braceDepth = 0;
+
+      if (!rhsIsBlockFunction) {
+        for (let k = rhsScanStart; k < Math.min(tokens.length, rhsScanStart + 40); k++) {
+          const tk = tokens[k]!;
+          if (tk.value === "(") parenDepth++;
+          else if (tk.value === ")") {
+            if (parenDepth === 0) break;
+            parenDepth--;
+          } else if (tk.value === "[") bracketDepth++;
+          else if (tk.value === "]") {
+            if (bracketDepth === 0) break;
+            bracketDepth--;
+          } else if (tk.value === "{") {
+            if (classifyBraceAt(k).kind === "function") break;
+            braceDepth++;
+          } else if (tk.value === "}") {
+            if (braceDepth === 0) break;
+            braceDepth--;
+          } else if ((tk.value === ";" || tk.value === ",") && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+            break;
           }
-        }
-        if ((tk.kind === "string" && matchesCredPattern(tk.value) !== null) || matchJoinedCredPathAt(k) !== null) {
-          rhsHasCred = true;
-        }
-        if (tk.kind === "ident" && isNotMemberProp(k)) {
-          const prevTaint = taintedVars.get(tk.value);
-          if (prevTaint) {
-            rhsTaintSource = prevTaint.source;
+          if (
+            k > rhsScanStart &&
+            parenDepth === 0 &&
+            bracketDepth === 0 &&
+            braceDepth === 0 &&
+            tk.line > tokens[k - 1]!.line &&
+            tk.kind === "ident" &&
+            (tk.value === "const" ||
+              tk.value === "let" ||
+              tk.value === "var" ||
+              tk.value === "function" ||
+              tk.value === "return" ||
+              tk.value === "export" ||
+              tk.value === "import")
+          ) {
+            break;
+          }
+
+          if ((tk.kind === "string" && matchesCredPattern(tk.value) !== null) || matchJoinedCredPathAt(k) !== null) {
+            rhsHasCred = true;
+          }
+          if (tk.kind === "ident" && isNotMemberProp(k) && !isObjectLiteralKey(k)) {
+            if (rhsDefaultTaintedParams.has(tk.value)) {
+              if (!rhsTaintSource) rhsTaintSource = rhsDefaultTaintedParams.get(tk.value)!.source;
+              continue;
+            }
+            if (rhsShadowedParams.has(tk.value)) {
+              continue;
+            }
+          }
+          const tm = getTaintAt(k);
+          if (tm.tainted) {
+            if (!rhsTaintSource) rhsTaintSource = tm.source ?? "process.env";
+            if (
+              tm.isWholeEnv &&
+              parenDepth === 0 &&
+              bracketDepth === 0 &&
+              braceDepth === 0 &&
+              tokens[k - 1]?.value !== "+" &&
+              tokens[(tm.endIdx ?? k) + 1]?.value !== "+"
+            ) {
+              rhsDirectWholeEnv = true;
+            }
+          }
+          if (tm.endIdx !== undefined && tm.endIdx > k) {
+            k = tm.endIdx;
           }
         }
       }
-      if ((rhsHasEnv && !rhsOnlyBenignEnv) || rhsHasCred || rhsTaintSource) {
+
+      // Commit updates to target scope frame
+      if (declKind !== null) {
+        declFrame.declaredVars.add(varName);
+      }
+
+      if (rhsSinkAlias !== null) {
+        declFrame.sinkAliases.set(varName, rhsSinkAlias);
+      } else if (canKillInTarget) {
+        declFrame.sinkAliases.set(varName, null);
+      }
+
+      if (resolvedStr !== null) {
+        declFrame.stringVars.set(varName, resolvedStr);
+      } else if (canKillInTarget) {
+        declFrame.stringVars.set(varName, null);
+      }
+
+      if (isProcAliasRhs) {
+        declFrame.processAliases.set(varName, true);
+      } else if (canKillInTarget) {
+        declFrame.processAliases.set(varName, false);
+      }
+
+      if (rhsDirectWholeEnv) {
+        declFrame.envAliases.set(varName, true);
+      } else if (canKillInTarget) {
+        declFrame.envAliases.set(varName, false);
+      }
+
+      if (rhsHasCred || rhsTaintSource) {
         const src = rhsHasCred ? "credential_file" : rhsTaintSource ?? "process.env";
-        taintedVars.set(varName, { source: src, line: t.line });
+        declFrame.taintedVars.set(varName, { source: src, line: t.line });
         if (isExportedDecl) {
           exportedTainted.push({ name: varName, source: src, line: t.line });
         }
+      } else if (canKillInTarget) {
+        // Clean declaration or unconditional same-scope clean reassignment kills / shadows prior taint
+        declFrame.taintedVars.set(varName, null);
+      } else if (declKind === "var" && curFrame.activeDeclUnconditional) {
+        // `var x = clean` inside a block shadows locally without erasing enclosing branch taint
+        currentScope().taintedVars.set(varName, null);
+        currentScope().envAliases.set(varName, false);
       }
     }
 
-    // Destructuring:
+    // Object destructuring (including comma-list continuations, default-value taint, nested `env: { ... }`, & globalThis.process):
     //   const { NPM_TOKEN, AWS_SECRET_ACCESS_KEY } = process.env
-    //   const { env } = process  /  const { env: e } = process
-    if (
-      t.kind === "ident" &&
-      (t.value === "const" || t.value === "let" || t.value === "var") &&
-      t1?.value === "{"
-    ) {
-      const pairs: Array<{ prop: string; local: string }> = [];
+    //   const { env } = process  /  const { env: e } = globalThis.process  /  const { env: { NPM_TOKEN } } = process
+    //   const { tok = process.env.NPM_TOKEN } = {}
+    //   const { url2 } = options (shadows cleanly when RHS & default are clean!)
+    const isStartObjDestr = isDeclKw && t1?.value === "{";
+    const isCommaObjDestr =
+      !isDeclKw &&
+      curFrame.activeDeclKind !== null &&
+      loopParenDepth === curFrame.activeDeclDepth.paren &&
+      loopBracketDepth === curFrame.activeDeclDepth.bracket &&
+      loopBraceDepth - 1 === curFrame.activeDeclDepth.brace &&
+      tokens[i - 1]?.value === "," &&
+      t.value === "{";
+    if (isStartObjDestr || isCommaObjDestr) {
+      const openBraceIdx = isStartObjDestr ? i + 1 : i;
+      const declKind = isStartObjDestr ? (t.value as "const" | "let" | "var") : curFrame.activeDeclKind!;
+      const pairs: Array<{ prop: string; local: string; defaultTaint?: TaintEntry; isNestedEnv?: boolean }> = [];
       let closeIdx = -1;
-      for (let k = i + 2; k < Math.min(tokens.length, i + 24); k++) {
+      let dDepth = 0;
+      let inNestedEnvDepth = -1;
+      for (let k = openBraceIdx + 1; k < Math.min(tokens.length, openBraceIdx + 64); k++) {
         const tk = tokens[k]!;
-        if (tk.value === "}") {
-          closeIdx = k;
-          break;
-        }
-        if (tk.kind === "ident") {
-          if (tokens[k + 1]?.value === ":" && tokens[k + 2]?.kind === "ident") {
-            pairs.push({ prop: tk.value, local: tokens[k + 2]!.value });
-            k += 2;
-          } else {
-            pairs.push({ prop: tk.value, local: tk.value });
+        if (tk.value === "{" || tk.value === "[") {
+          dDepth++;
+        } else if (tk.value === "}" || tk.value === "]") {
+          if (dDepth === 0 && tk.value === "}") {
+            closeIdx = k;
+            break;
           }
-        }
-      }
-      const isExportedDestruct = tokens[i - 1]?.kind === "ident" && tokens[i - 1]?.value === "export";
-      if (closeIdx > 0 && tokens[closeIdx + 1]?.value === "=") {
-        const rhsTok = tokens[closeIdx + 2];
-        if (matchProcessEnvAt(closeIdx + 2).matched) {
-          for (const p of pairs) {
-            if (!BENIGN_ENV_VARS.has(p.prop)) {
-              taintedVars.set(p.local, { source: `process.env.${p.prop}`, line: t.line });
-              if (isExportedDestruct) {
-                exportedTainted.push({ name: p.local, source: `process.env.${p.prop}`, line: t.line });
+          if (dDepth === inNestedEnvDepth) inNestedEnvDepth = -1;
+          dDepth = Math.max(0, dDepth - 1);
+        } else if (tk.value === "=") {
+          // Scan default value expression for taint until depth-0 `,` or enclosing `}`/`]`
+          let sDepth = 0;
+          let defTaint: TaintEntry | undefined;
+          let m = k + 1;
+          for (; m < Math.min(tokens.length, openBraceIdx + 64); m++) {
+            const mt = tokens[m]!;
+            if (mt.value === "(" || mt.value === "[" || mt.value === "{") sDepth++;
+            else if (mt.value === ")" || mt.value === "]" || mt.value === "}") {
+              if (sDepth === 0) break;
+              sDepth--;
+            } else if (mt.value === "," && sDepth === 0) break;
+            else if (!defTaint) {
+              if ((mt.kind === "string" && matchesCredPattern(mt.value) !== null) || matchJoinedCredPathAt(m) !== null) {
+                defTaint = { source: "credential_file", line: mt.line };
+              } else {
+                const tm = getTaintAt(m);
+                if (tm.tainted) {
+                  defTaint = { source: tm.source ?? "process.env", line: mt.line };
+                }
+                if (tm.endIdx !== undefined && tm.endIdx > m) m = tm.endIdx;
               }
             }
           }
-        } else if (rhsTok?.kind === "ident" && processAliases.has(rhsTok.value) && tokens[closeIdx + 3]?.value !== ".") {
+          if (defTaint && pairs.length > 0) {
+            pairs[pairs.length - 1]!.defaultTaint = defTaint;
+          }
+          k = m - 1;
+        } else if (tk.kind === "ident" && (dDepth === 0 || dDepth === inNestedEnvDepth)) {
+          if (dDepth === 0 && tk.value === "env" && tokens[k + 1]?.value === ":" && tokens[k + 2]?.value === "{") {
+            dDepth++;
+            inNestedEnvDepth = dDepth;
+            k += 2;
+            continue;
+          }
+          const isNested = dDepth === inNestedEnvDepth && inNestedEnvDepth > 0;
+          if (tokens[k + 1]?.value === ":" && tokens[k + 2]?.kind === "ident") {
+            pairs.push({ prop: tk.value, local: tokens[k + 2]!.value, isNestedEnv: isNested });
+            k += 2;
+          } else {
+            pairs.push({ prop: tk.value, local: tk.value, isNestedEnv: isNested });
+          }
+        }
+      }
+      if (closeIdx > 0) {
+        skipReAssignUntil = Math.max(skipReAssignUntil, closeIdx);
+      }
+      const isExportedDestruct =
+        (isStartObjDestr && tokens[i - 1]?.kind === "ident" && tokens[i - 1]?.value === "export") ||
+        (isCommaObjDestr && curFrame.activeDeclExported);
+      const declFrame = declKind === "var" ? currentFunctionOrRootScope() : curFrame;
+      const canKillInTarget =
+        declKind === "var" ? declFrame === curFrame && curFrame.activeDeclUnconditional : declFrame === curFrame;
+      if (closeIdx > 0 && tokens[closeIdx + 1]?.value === "=") {
+        const rhsIdx = closeIdx + 2;
+        const envDestr = matchProcessEnvAt(rhsIdx);
+        const procDestr = matchProcessObjAt(rhsIdx);
+        if (envDestr.matched && !envDestr.propName && !envDestr.isDynamicProp) {
           for (const p of pairs) {
-            if (p.prop === "env") {
-              envAliases.add(p.local);
-              taintedVars.set(p.local, { source: "process.env", line: t.line });
+            if (!BENIGN_ENV_VARS.has(p.prop) || p.defaultTaint) {
+              const src = !BENIGN_ENV_VARS.has(p.prop) ? `process.env.${p.prop}` : p.defaultTaint!.source;
+              declFrame.declaredVars.add(p.local);
+              declFrame.taintedVars.set(p.local, { source: src, line: t.line });
+              if (isExportedDestruct) {
+                exportedTainted.push({ name: p.local, source: src, line: t.line });
+              }
+            } else if (canKillInTarget) {
+              bindCleanInFrame(declFrame, p.local, lookupPrepassSinkDefAt(p.local, i));
+            } else {
+              declFrame.declaredVars.add(p.local);
+            }
+          }
+        } else if (
+          procDestr.matched &&
+          tokens[procDestr.endIdx + 1]?.value !== "." &&
+          tokens[procDestr.endIdx + 1]?.value !== "["
+        ) {
+          for (const p of pairs) {
+            if (p.isNestedEnv) {
+              if (!BENIGN_ENV_VARS.has(p.prop) || p.defaultTaint) {
+                const src = !BENIGN_ENV_VARS.has(p.prop) ? `process.env.${p.prop}` : p.defaultTaint!.source;
+                declFrame.declaredVars.add(p.local);
+                declFrame.taintedVars.set(p.local, { source: src, line: t.line });
+                if (isExportedDestruct) {
+                  exportedTainted.push({ name: p.local, source: src, line: t.line });
+                }
+              } else if (canKillInTarget) {
+                bindCleanInFrame(declFrame, p.local, lookupPrepassSinkDefAt(p.local, i));
+              } else {
+                declFrame.declaredVars.add(p.local);
+              }
+            } else if (p.prop === "env") {
+              declFrame.declaredVars.add(p.local);
+              declFrame.envAliases.set(p.local, true);
+              declFrame.taintedVars.set(p.local, { source: "process.env", line: t.line });
               if (isExportedDestruct) {
                 exportedTainted.push({ name: p.local, source: "process.env", line: t.line });
               }
+            } else if (p.defaultTaint) {
+              declFrame.declaredVars.add(p.local);
+              declFrame.taintedVars.set(p.local, p.defaultTaint);
+              if (isExportedDestruct) {
+                exportedTainted.push({ name: p.local, source: p.defaultTaint.source, line: t.line });
+              }
+            } else if (canKillInTarget) {
+              bindCleanInFrame(declFrame, p.local, lookupPrepassSinkDefAt(p.local, i));
+            } else {
+              declFrame.declaredVars.add(p.local);
+            }
+          }
+        } else {
+          // General destructuring RHS: track all 3 nesting depths so `{ a: "safe", b: tok }` does not stop early at `,`
+          let destrTaint: string | null = null;
+          let dp = 0;
+          let db = 0;
+          let dc = 0;
+          for (let k = rhsIdx; k < Math.min(tokens.length, rhsIdx + 40); k++) {
+            const dk = tokens[k]!;
+            if (dk.value === "(") dp++;
+            else if (dk.value === ")") {
+              if (dp === 0) break;
+              dp--;
+            } else if (dk.value === "[") db++;
+            else if (dk.value === "]") {
+              if (db === 0) break;
+              db--;
+            } else if (dk.value === "{") {
+              if (classifyBraceAt(k).kind === "function") break;
+              dc++;
+            } else if (dk.value === "}") {
+              if (dc === 0) break;
+              dc--;
+            } else if ((dk.value === ";" || dk.value === ",") && dp === 0 && db === 0 && dc === 0) {
+              break;
+            }
+            if ((dk.kind === "string" && matchesCredPattern(dk.value) !== null) || matchJoinedCredPathAt(k) !== null) {
+              destrTaint = "credential_file";
+              break;
+            }
+            const tm = getTaintAt(k);
+            if (tm.tainted) {
+              destrTaint = tm.source ?? "process.env";
+              break;
+            }
+            if (tm.endIdx !== undefined && tm.endIdx > k) k = tm.endIdx;
+          }
+          for (const p of pairs) {
+            const effectiveSrc = destrTaint ?? p.defaultTaint?.source ?? null;
+            if (effectiveSrc) {
+              declFrame.declaredVars.add(p.local);
+              declFrame.taintedVars.set(p.local, { source: effectiveSrc, line: t.line });
+              if (isExportedDestruct) {
+                exportedTainted.push({ name: p.local, source: effectiveSrc, line: t.line });
+              }
+            } else if (canKillInTarget) {
+              bindCleanInFrame(declFrame, p.local, lookupPrepassSinkDefAt(p.local, i));
+            } else {
+              declFrame.declaredVars.add(p.local);
             }
           }
         }
       }
     }
 
-    // Track ESM/CJS exports of tainted variables, exported sink wrappers, or functions returning tainted data
+    // Array destructuring (including comma-list continuations, default-value taint, & 3-depth RHS scanning):
+    //   const [url2, rest] = expr  /  const [tok = process.env.NPM_TOKEN] = []
+    const isStartArrDestr = isDeclKw && t1?.value === "[";
+    const isCommaArrDestr =
+      !isDeclKw &&
+      curFrame.activeDeclKind !== null &&
+      loopParenDepth === curFrame.activeDeclDepth.paren &&
+      loopBracketDepth - 1 === curFrame.activeDeclDepth.bracket &&
+      loopBraceDepth === curFrame.activeDeclDepth.brace &&
+      tokens[i - 1]?.value === "," &&
+      t.value === "[";
+    if (isStartArrDestr || isCommaArrDestr) {
+      const openBrIdx = isStartArrDestr ? i + 1 : i;
+      const declKind = isStartArrDestr ? (t.value as "const" | "let" | "var") : curFrame.activeDeclKind!;
+      const locals: Array<{ name: string; defaultTaint?: TaintEntry }> = [];
+      let closeIdx = -1;
+      let aDepth = 0;
+      for (let k = openBrIdx + 1; k < Math.min(tokens.length, openBrIdx + 48); k++) {
+        const tk = tokens[k]!;
+        if (tk.value === "[" || tk.value === "{") {
+          aDepth++;
+        } else if (tk.value === "]" || tk.value === "}") {
+          if (aDepth === 0 && tk.value === "]") {
+            closeIdx = k;
+            break;
+          }
+          aDepth = Math.max(0, aDepth - 1);
+        } else if (tk.value === "=") {
+          let sDepth = 0;
+          let defTaint: TaintEntry | undefined;
+          let m = k + 1;
+          for (; m < Math.min(tokens.length, openBrIdx + 48); m++) {
+            const mt = tokens[m]!;
+            if (mt.value === "(" || mt.value === "[" || mt.value === "{") sDepth++;
+            else if (mt.value === ")" || mt.value === "]" || mt.value === "}") {
+              if (sDepth === 0) break;
+              sDepth--;
+            } else if (mt.value === "," && sDepth === 0) break;
+            else if (!defTaint) {
+              if ((mt.kind === "string" && matchesCredPattern(mt.value) !== null) || matchJoinedCredPathAt(m) !== null) {
+                defTaint = { source: "credential_file", line: mt.line };
+              } else {
+                const tm = getTaintAt(m);
+                if (tm.tainted) {
+                  defTaint = { source: tm.source ?? "process.env", line: mt.line };
+                }
+                if (tm.endIdx !== undefined && tm.endIdx > m) m = tm.endIdx;
+              }
+            }
+          }
+          if (defTaint && locals.length > 0) {
+            locals[locals.length - 1]!.defaultTaint = defTaint;
+          }
+          k = m - 1;
+        } else if (tk.kind === "ident" && aDepth === 0) {
+          locals.push({ name: tk.value });
+        }
+      }
+      if (closeIdx > 0) {
+        skipReAssignUntil = Math.max(skipReAssignUntil, closeIdx);
+      }
+      const isExportedArrDestr =
+        (isStartArrDestr && tokens[i - 1]?.kind === "ident" && tokens[i - 1]?.value === "export") ||
+        (isCommaArrDestr && curFrame.activeDeclExported);
+      const declFrame = declKind === "var" ? currentFunctionOrRootScope() : currentScope();
+      const canKillInTarget =
+        declKind === "var" ? declFrame === currentScope() && curFrame.activeDeclUnconditional : declFrame === currentScope();
+      if (closeIdx > 0 && tokens[closeIdx + 1]?.value === "=") {
+        let arrTaint: string | null = null;
+        let dp = 0;
+        let db = 0;
+        let dc = 0;
+        for (let k = closeIdx + 2; k < Math.min(tokens.length, closeIdx + 40); k++) {
+          const dk = tokens[k]!;
+          if (dk.value === "(") dp++;
+          else if (dk.value === ")") {
+            if (dp === 0) break;
+            dp--;
+          } else if (dk.value === "[") db++;
+          else if (dk.value === "]") {
+            if (db === 0) break;
+            db--;
+          } else if (dk.value === "{") {
+            if (classifyBraceAt(k).kind === "function") break;
+            dc++;
+          } else if (dk.value === "}") {
+            if (dc === 0) break;
+            dc--;
+          } else if ((dk.value === ";" || dk.value === ",") && dp === 0 && db === 0 && dc === 0) {
+            break;
+          }
+          if ((dk.kind === "string" && matchesCredPattern(dk.value) !== null) || matchJoinedCredPathAt(k) !== null) {
+            arrTaint = "credential_file";
+            break;
+          }
+          const tm = getTaintAt(k);
+          if (tm.tainted) {
+            arrTaint = tm.source ?? "process.env";
+            break;
+          }
+          if (tm.endIdx !== undefined && tm.endIdx > k) k = tm.endIdx;
+        }
+        for (const loc of locals) {
+          const effectiveSrc = arrTaint ?? loc.defaultTaint?.source ?? null;
+          if (effectiveSrc) {
+            declFrame.declaredVars.add(loc.name);
+            declFrame.taintedVars.set(loc.name, { source: effectiveSrc, line: t.line });
+            if (isExportedArrDestr) {
+              exportedTainted.push({ name: loc.name, source: effectiveSrc, line: t.line });
+            }
+          } else if (canKillInTarget) {
+            bindCleanInFrame(declFrame, loc.name, lookupPrepassSinkDefAt(loc.name, i));
+          } else {
+            declFrame.declaredVars.add(loc.name);
+          }
+        }
+      }
+    }
+
+    // Track ESM/CJS exports of tainted variables or exported sink wrappers
     if (t.kind === "ident" && t.value === "export") {
       if (t1?.value === "{") {
         for (let k = i + 2; k < Math.min(tokens.length, i + 30) && tokens[k]?.value !== "}"; k++) {
           const tk = tokens[k]!;
           if (tk.kind !== "ident") continue;
-          const taint = taintedVars.get(tk.value);
-          const sk = wrapperSinks.get(tk.value) ?? sinkAliases.get(tk.value);
+          const taint = lookupTainted(tk.value);
+          const sk = lookupEffectiveSink(tk.value, k);
           if (tokens[k + 1]?.value === "as" && tokens[k + 2]?.kind === "ident") {
             const alias = tokens[k + 2]!.value;
             if (taint) exportedTainted.push({ name: alias, source: taint.source, line: t.line });
@@ -2524,30 +4095,13 @@ export function analyzeSourceBlob(
           }
         }
       } else if (t1?.value === "default") {
-        const rhsM = matchProcessEnvAt(i + 2);
-        const rhsTaint = t2?.kind === "ident" ? taintedVars.get(t2.value) : undefined;
-        const rhsSink = t2?.kind === "ident" ? (wrapperSinks.get(t2.value) ?? sinkAliases.get(t2.value)) : undefined;
-        if (rhsTaint) {
-          exportedTainted.push({ name: "default", source: rhsTaint.source, line: t.line });
-        } else if (rhsM.matched && !(rhsM.propName && BENIGN_ENV_VARS.has(rhsM.propName))) {
-          exportedTainted.push({ name: "default", source: "process.env", line: t.line });
+        const tm = getTaintAt(i + 2);
+        const rhsSink = t2?.kind === "ident" ? lookupEffectiveSink(t2.value, i + 2) : null;
+        if (tm.tainted) {
+          exportedTainted.push({ name: "default", source: tm.source ?? "process.env", line: t.line });
         }
         if (rhsSink) {
           exportedSinks.push({ name: "default", sink_kind: rhsSink, line: t.line });
-        }
-      } else if (t1?.value === "function" && t2?.kind === "ident") {
-        const fnName = t2.value;
-        for (let k = i + 3; k < Math.min(tokens.length, i + 48); k++) {
-          if (tokens[k]?.value === "}") break;
-          const envM = matchProcessEnvAt(k);
-          if (
-            (envM.matched && !(envM.propName && BENIGN_ENV_VARS.has(envM.propName))) ||
-            (tokens[k]?.kind === "string" && matchesCredPattern(tokens[k]!.value) !== null) ||
-            matchJoinedCredPathAt(k) !== null
-          ) {
-            exportedTainted.push({ name: fnName, source: envM.matched ? "process.env" : "credential_file", line: t.line });
-            break;
-          }
         }
       }
     }
@@ -2560,16 +4114,16 @@ export function analyzeSourceBlob(
       for (let k = i + 4; k < Math.min(tokens.length, i + 24); k++) {
         const tk = tokens[k]!;
         if (tk.value === ";") break;
-        const tv = tk.kind === "ident" ? taintedVars.get(tk.value) : undefined;
-        const sk = tk.kind === "ident" ? (wrapperSinks.get(tk.value) ?? sinkAliases.get(tk.value)) : undefined;
-        const envM = matchProcessEnvAt(k);
-        if (tv) {
-          exportedTainted.push({ name: expName, source: tv.source, line: t.line });
-          if (expName === "default") exportedTainted.push({ name: tk.value, source: tv.source, line: t.line });
-        } else if (envM.matched && !(envM.propName && BENIGN_ENV_VARS.has(envM.propName))) {
-          exportedTainted.push({ name: expName, source: "process.env", line: t.line });
-          break;
+        const sk = tk.kind === "ident" && !isObjectLiteralKey(k) ? lookupEffectiveSink(tk.value, k) : null;
+        const tm = getTaintAt(k);
+        if (tm.tainted) {
+          exportedTainted.push({ name: expName, source: tm.source ?? "process.env", line: t.line });
+          if (expName === "default" && tk.kind === "ident" && !tm.isDirectEnv) {
+            exportedTainted.push({ name: tk.value, source: tm.source ?? "process.env", line: t.line });
+          }
+          if (tm.isDirectEnv) break;
         }
+        if (tm.endIdx !== undefined && tm.endIdx > k) k = tm.endIdx;
         if (sk) {
           exportedSinks.push({ name: expName, sink_kind: sk, line: t.line });
           if (expName === "default") exportedSinks.push({ name: tk.value, sink_kind: sk, line: t.line });
@@ -2592,7 +4146,7 @@ export function analyzeSourceBlob(
           if (depth <= 0) break;
         }
         const envM = matchProcessEnvAt(k);
-        if (envM.matched && !envM.propName) {
+        if (envM.matched && !envM.propName && !envM.isDynamicProp && !isBenignWholeEnvGuard(k, envM.endIdx ?? k)) {
           hasEnvSerialize = true;
           observations.push({
             code: "ENV_SERIALIZATION_EXFIL",
@@ -2605,21 +4159,25 @@ export function analyzeSourceBlob(
           });
           break;
         }
+        if (envM.endIdx !== undefined && envM.endIdx > k) k = envM.endIdx;
       }
     }
 
     // Object spread of process.env: { ...process.env } or { ...envAlias }
-    if (t.value === "." && t1?.value === "." && t2?.value === "." && matchProcessEnvAt(i + 3).matched && !matchProcessEnvAt(i + 3).propName) {
-      hasEnvSerialize = true;
-      observations.push({
-        code: "ENV_SERIALIZATION_EXFIL",
-        severity: "CRITICAL",
-        path: filePath,
-        line: t.line,
-        digest_sha256: sha256,
-        attack_id: "T1552.001",
-        detail: `Bulk object spread of process.env ({ ...process.env }) at '${filePath}:${t.line}'.`,
-      });
+    if (t.value === "." && t1?.value === "." && t2?.value === ".") {
+      const spreadEnv = matchProcessEnvAt(i + 3);
+      if (spreadEnv.matched && !spreadEnv.propName && !spreadEnv.isDynamicProp) {
+        hasEnvSerialize = true;
+        observations.push({
+          code: "ENV_SERIALIZATION_EXFIL",
+          severity: "CRITICAL",
+          path: filePath,
+          line: t.line,
+          digest_sha256: sha256,
+          attack_id: "T1552.001",
+          detail: `Bulk object spread of process.env ({ ...process.env }) at '${filePath}:${t.line}'.`,
+        });
+      }
     }
 
     // String.fromCharCode / fromCodePoint long payload chain (>= 10 char codes)
@@ -2653,7 +4211,10 @@ export function analyzeSourceBlob(
     const envDirect = matchProcessEnvAt(i);
     if (envDirect.matched && envDirect.propName) {
       if (SENSITIVE_ENV_KEYWORDS.some((kw) => envDirect.propName!.toUpperCase().includes(kw))) {
-        taintedVars.set(`process.env.${envDirect.propName}`, { source: `process.env.${envDirect.propName}`, line: t.line });
+        currentScope().taintedVars.set(`process.env.${envDirect.propName}`, {
+          source: `process.env.${envDirect.propName}`,
+          line: t.line,
+        });
       }
     }
 
@@ -2693,9 +4254,14 @@ export function analyzeSourceBlob(
     if (impCallArgsStart !== -1) {
       let impCallTarget: { from: string; importedName: string } | null = null;
       const impRecvIdx = getMemberReceiverIdx(i);
-      if (impRecvIdx === -1 && importedBindings.has(t.value)) {
+      if (impRecvIdx === -1 && importedBindings.has(t.value) && !isShadowedLocally(t.value)) {
         impCallTarget = importedBindings.get(t.value)!;
-      } else if (impRecvIdx >= 0 && tokens[impRecvIdx]?.kind === "ident" && importedNamespaces.has(tokens[impRecvIdx]!.value)) {
+      } else if (
+        impRecvIdx >= 0 &&
+        tokens[impRecvIdx]?.kind === "ident" &&
+        importedNamespaces.has(tokens[impRecvIdx]!.value) &&
+        !isShadowedLocally(tokens[impRecvIdx]!.value)
+      ) {
         impCallTarget = { from: importedNamespaces.get(tokens[impRecvIdx]!.value)!, importedName: t.value };
       }
       if (impCallTarget) {
@@ -2711,17 +4277,14 @@ export function analyzeSourceBlob(
           } else if (at.kind === "string") {
             icStrArgs.push(at.value);
           } else if (at.kind === "ident" && isNotMemberProp(k)) {
-            const sv = stringVars.get(at.value);
+            const sv = lookupStringVar(at.value);
             if (sv) icStrArgs.push(sv);
             if (!icTaintSource) {
-              const tv = taintedVars.get(at.value);
-              if (tv) icTaintSource = tv.source;
-              else {
-                const envM = matchProcessEnvAt(k);
-                if (envM.matched && !(envM.propName && BENIGN_ENV_VARS.has(envM.propName))) {
-                  icTaintSource = envM.propName ? `process.env.${envM.propName}` : "process.env";
-                }
+              const tm = getTaintAt(k);
+              if (tm.tainted) {
+                icTaintSource = tm.source ?? "process.env";
               }
+              if (tm.endIdx !== undefined && tm.endIdx > k) k = tm.endIdx;
             }
           }
         }
@@ -2774,13 +4337,13 @@ export function analyzeSourceBlob(
           if (argTok.kind === "string") {
             childStringArgs.push(argTok.value);
           } else if (argTok.kind === "ident" && isNotMemberProp(k)) {
-            const boundStr = stringVars.get(argTok.value);
+            const boundStr = lookupStringVar(argTok.value);
             if (boundStr) childStringArgs.push(boundStr);
           }
         }
 
         // Track imported symbol flowing into a network/exec sink for cross-file split-payload taint join
-        if (argTok.kind === "ident" && isNotMemberProp(k)) {
+        if (argTok.kind === "ident" && isNotMemberProp(k) && !isShadowedLocally(argTok.value)) {
           const imp = importedBindings.get(argTok.value);
           if (imp) {
             importedSinks.push({
@@ -2800,8 +4363,8 @@ export function analyzeSourceBlob(
         }
 
         if (!taintHit) {
-          const tainted = argTok.kind === "ident" && isNotMemberProp(k) ? taintedVars.get(argTok.value) : undefined;
-          if (tainted) {
+          const tm = getTaintAt(k);
+          if (tm.tainted) {
             taintHit = true;
             observations.push({
               code: "TAINT_CRED_TO_NETWORK_OR_EXEC",
@@ -2810,23 +4373,12 @@ export function analyzeSourceBlob(
               line: t.line,
               digest_sha256: sha256,
               attack_id: sinkKind === "network" ? "T1041" : "T1059.007",
-              detail: `Tainted identifier '${argTok.value}' (from ${tainted.source} at line ${tainted.line}) flows into sink '${t.value}()' at '${filePath}:${t.line}'.`,
+              detail: tm.isDirectEnv
+                ? `Direct process.env reference flows into sink '${t.value}()' at '${filePath}:${t.line}'.`
+                : `Tainted identifier '${argTok.value}' (from ${tm.source} at line ${tm.line}) flows into sink '${t.value}()' at '${filePath}:${t.line}'.`,
             });
-          } else {
-            const argEnv = matchProcessEnvAt(k);
-            if (argEnv.matched && !(argEnv.propName && BENIGN_ENV_VARS.has(argEnv.propName))) {
-              taintHit = true;
-              observations.push({
-                code: "TAINT_CRED_TO_NETWORK_OR_EXEC",
-                severity: "CRITICAL",
-                path: filePath,
-                line: t.line,
-                digest_sha256: sha256,
-                attack_id: sinkKind === "network" ? "T1041" : "T1059.007",
-                detail: `Direct process.env reference flows into sink '${t.value}()' at '${filePath}:${t.line}'.`,
-              });
-            }
           }
+          if (tm.endIdx !== undefined && tm.endIdx > k) k = tm.endIdx;
         }
       }
 

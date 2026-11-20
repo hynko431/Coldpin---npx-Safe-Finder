@@ -55,6 +55,7 @@ const BOOLEAN_FLAGS = new Set([
   "verbose",
   "check-public",
   "help",
+  "version",
 ]);
 
 const VALUE_FLAGS = new Set([
@@ -93,6 +94,11 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     }
     if (a === "-h") {
       flags["help"] = true;
+      i++;
+      continue;
+    }
+    if (a === "-V") {
+      flags["version"] = true;
       i++;
       continue;
     }
@@ -183,6 +189,8 @@ COMMON FLAGS:
   --verbose                 Emit structured operational JSON telemetry to stderr (zero secrets/PII)
   --offline                 Disable all outbound network queries (fail closed)
   --check-public            Probe public npmjs.org for unscoped claimability (verify-confusion)
+  --version, -V             Print coldpin CLI version and exit
+  --help, -h                Print this help message and exit
 
 EXIT CODES:
   0 = VERIFIED_CLEAN_WITHIN_SCOPE / check passed
@@ -197,6 +205,10 @@ async function main(): Promise<ExitCode> {
   if (parsed.error) {
     process.stderr.write(`Error: ${parsed.error}\n`);
     return 1;
+  }
+  if (boolFlag(parsed.flags, "version")) {
+    process.stdout.write(`coldpin v${ENGINE_VERSION}\n`);
+    return 0;
   }
   if (parsed.command === "help" || boolFlag(parsed.flags, "help")) {
     printHelp();

@@ -1,6 +1,6 @@
 {
   "name": "coldpin",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Zero-execution npx discovery, static malware triage, tarball-to-source parity, and pre-compromise clean-anchor recovery.",
   "type": "module",
   "license": "Apache-2.0",

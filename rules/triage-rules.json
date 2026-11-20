@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "ruleset_version": "1.2.0",
+  "ruleset_version": "1.2.1",
   "owner": "AppSec / Skill Maintainer",
   "rules": [
     {
@@ -32,7 +32,7 @@
       "code": "TAINT_CRED_TO_NETWORK_OR_EXEC",
       "severity": "CRITICAL",
       "attack_id": "T1041",
-      "description": "Sensitive credential file or non-benign process.env data (including optional chaining) flows (directly, multi-hop, via template literals, indirect/.call/.apply invocations, aliased ESM/CJS/createRequire sinks, multi-hop helper wrappers, or bidirectional cross-file/barrel re-export chains) into a network, DNS, or exec sink."
+      "description": "Sensitive credential file or non-benign process.env data (lexically scoped with parameter shadowing, clean-redeclaration kill, benign env-alias property filtering, optional chaining, and closure capture) flows (directly, multi-hop, via template literals, indirect/.call/.apply invocations, aliased ESM/CJS/createRequire sinks, multi-hop helper wrappers, or bidirectional cross-file/barrel re-export chains) into a network, DNS, or exec sink."
     },
     {
       "code": "ENV_SERIALIZATION_EXFIL",
@@ -62,7 +62,7 @@
       "code": "HIGH_ENTROPY_OBFUSCATION",
       "severity": "HIGH",
       "attack_id": "T1027",
-      "description": "High Shannon entropy, dense hex/unicode escapes, or _0x hex-identifier obfuscator signature requiring REA recovery."
+      "description": "High non-regex Shannon entropy (> 5.85), dense non-regex hex/unicode string or identifier escapes (> 60 escapes and >= 6% density), or _0x hex-identifier obfuscator signature requiring REA recovery."
     },
     {
       "code": "NATIVE_OR_WASM_ARTIFACT",

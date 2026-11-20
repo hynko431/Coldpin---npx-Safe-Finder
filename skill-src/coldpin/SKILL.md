@@ -10,7 +10,7 @@ description: >-
   escalating binary or obfuscated tarballs to REA.
 license: Apache-2.0
 metadata:
-  version: "1.2.0"
+  version: "1.2.1"
   author: "hynko431"
   tags:
     - npx
