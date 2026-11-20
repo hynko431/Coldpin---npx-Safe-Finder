@@ -1,4 +1,4 @@
-export const ENGINE_VERSION = "1.3.0";
+export const ENGINE_VERSION = "1.4.0";
 export const CACHE_SCHEMA_VERSION = "3";
 
 export type TrustVerdict =
@@ -323,6 +323,32 @@ export interface ConfusionReport {
   unknowns: string[];
 }
 
+export interface BatchDependencyFinding {
+  package_name: string;
+  declared_range: string;
+  route: "private" | "public" | "blocked_typo" | "blocked_unconfigured" | "blocked_secret";
+  status: "CLEAN_SCREENED" | "FLAGGED_SUSPICIOUS" | "MALICIOUS_OR_BLOCKED" | "UNVERIFIABLE_OFFLINE";
+  reasons: string[];
+  advisory_ids: string[];
+}
+
+export interface ManifestBatchReport {
+  schema_version: string;
+  manifest_path: string;
+  total_declared: number;
+  evaluated_count: number;
+  truncated_at_cap: boolean;
+  offline_mode: boolean;
+  summary_counts: {
+    clean_screened: number;
+    flagged_suspicious: number;
+    malicious_or_blocked: number;
+    unverifiable_offline: number;
+  };
+  flagged: BatchDependencyFinding[];
+  unknowns: string[];
+}
+
 export interface AuditEvent {
   seq: number;
   ts_utc: string;
@@ -331,7 +357,7 @@ export interface AuditEvent {
   mcp_client_name?: string;
   tool_name?: string;
   actor_id_hash: string;
-  action: "discover" | "inspect" | "resolve-anchor" | "verify-confusion";
+  action: "discover" | "inspect" | "resolve-anchor" | "verify-confusion" | "audit-manifest-batch";
   target: string;
   version?: string;
   commit_sha?: string;

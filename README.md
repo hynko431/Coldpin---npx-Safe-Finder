@@ -30,7 +30,7 @@ node --no-warnings lib/cli.mjs --help
 node --no-warnings lib/mcp.mjs        # Start local stdio MCP server (or: coldpin mcp)
 ```
 
-Or install via npm (`npx --ignore-scripts coldpin@1.3.0 mcp`) or download a checksum-verified host bundle (`coldpin-{antigravity,claude,openai}.zip` + `SHA256SUMS.txt`) from [GitHub Releases](https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases).
+Or install via npm (`npx --ignore-scripts coldpin@1.4.0 mcp`) or download a checksum-verified host bundle (`coldpin-{antigravity,claude,openai}.zip` + `SHA256SUMS.txt`) from [GitHub Releases](https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases).
 
 ### Antigravity (Direct GitHub Install / Workspace / App / IDEs)
 
@@ -54,7 +54,7 @@ See [Harnesses](docs/harnesses.md) for `mcp_config.json`, `server.json` (`io.git
 
 ## Try your first audit
 
-Run any step below directly from your terminal or ask your coding agent to invoke Coldpin's MCP tools (`discover_packages`, `inspect_package_artifact`, `resolve_safe_anchor`, `verify_confusion`, `audit_verify`, `get_artifact_report`).
+Run any step below directly from your terminal or ask your coding agent to invoke Coldpin's 7 MCP tools (`discover_packages`, `inspect_package_artifact`, `resolve_safe_anchor`, `verify_confusion`, `audit_manifest_batch`, `audit_verify`, `get_artifact_report`).
 
 <img src="skills/coldpin/assets/icon.svg" width="20" height="20" align="top" alt=""> **1. Discover `npx` tools safely**
 
@@ -81,9 +81,10 @@ node --no-warnings lib/cli.mjs resolve-anchor @org/tool --git-dir ./repo --windo
 
 Pinpoints the patient-zero commit, checks cached full-tree blobs across history, verifies CVE/KEV gates, and emits `ROLLBACK_TO_SAFE_ANCHOR` only when a verified npm tarball exists (otherwise `FORENSIC_COMMIT_ONLY` or `SWITCH_TO_ALTERNATIVE`).
 
-<img src="skills/coldpin/assets/icon.svg" width="20" height="20" align="top" alt=""> **4. Audit dependency confusion & verify local audit trail**
+<img src="skills/coldpin/assets/icon.svg" width="20" height="20" align="top" alt=""> **4. Batch-screen `package.json`, audit dependency confusion & verify local audit trail**
 
 ```sh
+node --no-warnings lib/cli.mjs audit-batch ./package.json --limit 50
 node --no-warnings lib/cli.mjs verify-confusion ./package.json
 node --no-warnings lib/cli.mjs audit-verify ./audit.jsonl
 ```
@@ -94,7 +95,7 @@ node --no-warnings lib/cli.mjs audit-verify ./audit.jsonl
   <thead><tr><th align="left">Layer</th><th align="left">Trust Boundary</th><th align="left">Responsibility</th></tr></thead>
   <tbody>
     <tr valign="top"><td><strong>Deterministic CLI &amp; Local MCP (<code>lib/</code>)</strong></td><td>Zero execution; in-memory archive parsing; stdio-only (0 listening sockets); operator-only control plane</td><td>Computes 4-state verdict, SHA-512 verification, AST taint, parity, defanged IOCs, SARIF 2.1.0, CycloneDX 1.5 SBOM, and summary-first MCP paging.</td></tr>
-    <tr valign="top"><td><strong>Agent Skill (<code>skills/coldpin/SKILL.md</code>)</strong></td><td>Untrusted package prose isolated as data; fails closed on unknowns</td><td>Orchestrates the 6 MCP tools / 5 CLI verbs, enforces private-scope rules, and routes obfuscated/native artifacts to pre-installed REA.</td></tr>
+    <tr valign="top"><td><strong>Agent Skill (<code>skills/coldpin/SKILL.md</code>)</strong></td><td>Untrusted package prose isolated as data; fails closed on unknowns</td><td>Orchestrates the 7 MCP tools / 6 CLI verbs, enforces private-scope rules, and routes obfuscated/native artifacts to pre-installed REA.</td></tr>
     <tr valign="top"><td><strong>You</strong></td><td>Human approval gate before any host execution</td><td>Review observations, inferences, unknowns, and transitive caveats before running any pinned command.</td></tr>
   </tbody>
 </table>
@@ -110,6 +111,7 @@ Static triage does not replace runtime isolation or human judgment. See [FAQ](do
     <tr valign="top"><td width="210"><img src="skills/coldpin/assets/icon.svg" width="18" height="18" alt="" align="top">&nbsp;<code>inspect</code> / <code>inspect_package_artifact</code></td><td><code>0 / 2 / 3 / 1</code></td><td>Vet a package or local <code>.tgz</code> without execution and emit Card, JSON, SARIF 2.1.0, or CycloneDX SBOM.</td></tr>
     <tr valign="top"><td width="210"><img src="skills/coldpin/assets/icon.svg" width="18" height="18" alt="" align="top">&nbsp;<code>resolve-anchor</code> / <code>resolve_safe_anchor</code></td><td><code>0 / 2 / 3 / 1</code></td><td>Find patient-zero commit and recover a verified pre-compromise release or clean alternative.</td></tr>
     <tr valign="top"><td width="210"><img src="skills/coldpin/assets/icon.svg" width="18" height="18" alt="" align="top">&nbsp;<code>verify-confusion</code> / <code>verify_confusion</code></td><td><code>0 / 3 / 1</code></td><td>Audit <code>package.json</code> and <code>.npmrc</code> for unpinned private scopes and claimable internal names (<code>T1195.001</code>).</td></tr>
+    <tr valign="top"><td width="210"><img src="skills/coldpin/assets/icon.svg" width="18" height="18" alt="" align="top">&nbsp;<code>audit-batch</code> / <code>audit_manifest_batch</code></td><td><code>0 / 2 / 3 / 1</code></td><td>Batch-screen up to 50 direct dependencies in <code>package.json</code> (squat, policy, route-isolated OSV/<code>MAL-*</code>/KEV) with <code>&lt;= 500</code>-token MCP summaries.</td></tr>
     <tr valign="top"><td width="210"><img src="skills/coldpin/assets/icon.svg" width="18" height="18" alt="" align="top">&nbsp;<code>audit-verify</code> / <code>audit_verify</code></td><td><code>0 / 3 / 1</code></td><td>Verify local hash-chained <code>audit.jsonl</code> sequence and digest integrity.</td></tr>
     <tr valign="top"><td width="210"><img src="skills/coldpin/assets/icon.svg" width="18" height="18" alt="" align="top">&nbsp;<code>mcp</code> / <code>get_artifact_report</code></td><td><code>0 / 1</code></td><td>Serve the local <code>stdio</code> MCP server and page session-scoped inspection reports without SQLite verdict caching.</td></tr>
   </tbody>

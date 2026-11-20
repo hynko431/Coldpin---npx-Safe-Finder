@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import type { DiscoveryCardList, PackageInspectionReport, SafeAnchorDecision } from "../types.ts";
+import type {
+  DiscoveryCardList,
+  ManifestBatchReport,
+  PackageInspectionReport,
+  SafeAnchorDecision,
+} from "../types.ts";
 
 export const REPORT_STORE_MAX_ENTRIES = 25;
 export const REPORT_STORE_TTL_MS = 30 * 60 * 1000;
@@ -19,6 +24,10 @@ export type StoredReportPayload =
   | {
       kind: "anchor";
       decision: SafeAnchorDecision;
+    }
+  | {
+      kind: "batch";
+      report: ManifestBatchReport;
     };
 
 interface StoreEntry {

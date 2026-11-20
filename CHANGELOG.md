@@ -2,6 +2,13 @@
 
 All notable changes to `coldpin` (Coldpin; originally drafted under working title `npx-safe-finder`) are documented here following [Keep a Changelog](https://keepachangelog.com/) and Semantic Versioning.
 
+## [1.4.0] - 2026-11-21
+
+### Added
+- **Deterministic Batch Dependency Screening (`audit_manifest_batch` / `audit-batch`):** Added a 7th local read-only MCP tool (`audit_manifest_batch`) and matching 6th CLI verb (`coldpin audit-batch [path/to/package.json] [--include-dev] [--limit 1..50] [--offline] [--json]`) screening up to `50` direct dependencies from a root-confined `package.json` locally at `$0/mo`. Performs private-scope routing, `allowed_orgs`/`denied_orgs` policy screening, 7-primitive slopsquat/typosquat checks, and route-separated batch OSV/OpenSSF `MAL-*`/KEV lookups (failing closed as `UNVERIFIABLE_OFFLINE` when offline or when OSV lookups fail or are suppressed for private scopes). MCP responses default to compact `<= 2,000`-byte (`<= 500`-token) summaries prioritizing `MALICIOUS_OR_BLOCKED` ahead of `FLAGGED_SUSPICIOUS`, with full flagged-item paging via `get_artifact_report`.
+- **Node 24 + Node 26 Active LTS CI Matrix (`.github/workflows/ci.yml`):** Expanded CI verification from `2` to `4` matrix cells (`ubuntu-latest` + `windows-latest` × Node `24` LTS + Node `26` Active LTS) while keeping SARIF Code Scanning upload pinned to `ubuntu-latest` (Node `24`).
+- **Expanded Verification & Mutation Proofs (`tests/mcp-server.test.ts`, `scripts/run_benchmarks.ts`):** Added end-to-end MCP + CLI `audit_manifest_batch` verification (`33/33` deterministic tests) and 2 new mutation proofs (`mut-28-batch-manifest-malicious-and-private-isolation`, `mut-29-batch-summary-token-cap` — `29/29` total) covering the 50-dependency cap, private-scope OSV non-leakage, `MAL-*`/KEV/typosquat/unconfigured-private flagging, and `<= 2,000`-byte MCP summary enforcement.
+
 ## [1.3.0] - 2026-11-20
 
 ### Added

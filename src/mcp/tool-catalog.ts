@@ -131,6 +131,29 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     },
   },
   {
+    name: "audit_manifest_batch",
+    description:
+      "Batch-screen up to 50 direct dependencies from a root-confined package.json for squats, policy, private scopes, and OSV/KEV.",
+    annotations: {
+      title: "Batch Audit Manifest Dependencies",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        manifest_path: { type: "string", minLength: 1, maxLength: 1024, description: "Optional root-confined package.json path." },
+        include_dev: { type: "boolean", default: false, description: "Include devDependencies." },
+        max_deps: { type: "integer", minimum: 1, maximum: 50, default: 50, description: "Max direct dependencies (1-50)." },
+        offline: { type: "boolean", default: false, description: "Tighten-only offline flag." },
+        detail: { type: "string", enum: ["summary", "full"], default: "summary", description: "Output detail level." },
+      },
+    },
+  },
+  {
     name: "get_artifact_report",
     description:
       "Page through a session-scoped Coldpin report section (observations, iocs, unknowns, commits, card, sarif, sbom) by report_id.",

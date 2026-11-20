@@ -18,6 +18,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { PassThrough } from "node:stream";
 import { gunzipSync, gzipSync } from "node:zlib";
 import {
   validateRemoteGitUrl,
@@ -35,7 +36,9 @@ import {
   routeRegistry,
 } from "../src/config/policy.ts";
 import { resolveConfinedPath } from "../src/core/path-confinement.ts";
+import { runAuditManifestBatch } from "../src/core/workflows.ts";
 import { validateOutboundUrl, verifyNpmAttestationPayload } from "../src/intel/registry-osv.ts";
+import { ColdpinMcpServer, loadOperatorConfigFromEnv } from "../src/mcp/server.ts";
 import { computeMcpSchemaPin } from "../src/mcp/tool-catalog.ts";
 import { computeSha512Integrity, unpackTarballInMemory } from "../src/quarantine/safe-unpack.ts";
 import { ENGINE_VERSION } from "../src/types.ts";
@@ -618,6 +621,122 @@ async function runMutationChecks(): Promise<Array<{ id: string; passed: boolean;
       id: "mut-27-compiled-lib-parity-and-mcp-schema-pin",
       passed: libParityOk && pinDisk.catalog_sha256 === pinLive.catalog_sha256 && pinLive.estimated_tokens <= 1800,
       detail: `libParity=${libParityOk}, pinMatch=${pinDisk.catalog_sha256 === pinLive.catalog_sha256}, tokens=${pinLive.estimated_tokens}`,
+    });
+
+    // Mutation 28 (v1.4.0): audit_manifest_batch enforces 50-dep cap, private-scope blocking, squat detection, & offline fail-closed
+    const batchDir = join(dir, "batch-mut");
+    mkdirSync(batchDir, { recursive: true });
+    const batchDeps: Record<string, string> = {
+      "@acme/unconfigured-lib": "1.0.0",
+      lodahs: "1.0.0",
+    };
+    for (let i = 1; i <= 55; i++) {
+      batchDeps[`z-benign-${String(i).padStart(2, "0")}`] = "1.0.0";
+    }
+    const batchManifest = join(batchDir, "package.json");
+    writeFileSync(batchManifest, JSON.stringify({ name: "mut-batch", version: "1.0.0", dependencies: batchDeps }));
+    const batchCache = new SplitPlaneCache(":memory:");
+    const batchRes = await runAuditManifestBatch(
+      {
+        cwd: batchDir,
+        workspaceRoots: [batchDir],
+        enforceRootConfinement: true,
+        policy: { ...DEFAULT_POLICY, private_scopes: ["@acme"], offline_mode: true },
+        policy_sha256: "mut-batch-pol",
+        npmrc: { paths_loaded: [], scoped_registries: {}, auth_token_env_by_host: {} },
+        host_capabilities: {
+          node_version: process.version,
+          git_available: true,
+          git_partial_clone_supported: true,
+          rea_cli_available: false,
+          sqlite_available: true,
+        },
+        cache: batchCache,
+        invokerSurface: "mcp",
+        requestId: "mut_batch_28",
+      },
+      { manifestPath: batchManifest },
+    );
+    batchCache.close();
+    const mut28Ok =
+      batchRes.ok &&
+      batchRes.exitCode === 3 &&
+      batchRes.report.evaluated_count === 50 &&
+      batchRes.report.truncated_at_cap === true &&
+      batchRes.report.summary_counts.malicious_or_blocked === 1 &&
+      batchRes.report.summary_counts.flagged_suspicious === 1 &&
+      batchRes.report.summary_counts.unverifiable_offline === 48 &&
+      batchRes.report.summary_counts.clean_screened === 0;
+    results.push({
+      id: "mut-28-batch-manifest-malicious-and-private-isolation",
+      passed: mut28Ok,
+      detail: batchRes.ok
+        ? `eval=${batchRes.report.evaluated_count}/57, blocked=${batchRes.report.summary_counts.malicious_or_blocked}, susp=${batchRes.report.summary_counts.flagged_suspicious}, offline=${batchRes.report.summary_counts.unverifiable_offline}`
+        : `error=${batchRes.error}`,
+    });
+
+    // Mutation 29 (v1.4.0): MCP audit_manifest_batch summary stays strictly <= 2,000 bytes (<= 500 tokens) even with 25 flagged deps
+    const denseDir = join(dir, "batch-dense");
+    mkdirSync(denseDir, { recursive: true });
+    const denseDeps: Record<string, string> = {};
+    for (let i = 1; i <= 25; i++) {
+      denseDeps[`@acme/unconfigured-very-long-package-name-${String(i).padStart(2, "0")}`] = "1.0.0";
+    }
+    writeFileSync(join(denseDir, "package.json"), JSON.stringify({ name: "dense", version: "1.0.0", dependencies: denseDeps }));
+    const densePolicyPath = join(dir, "dense-policy.json");
+    writeFileSync(densePolicyPath, JSON.stringify({ private_scopes: ["@acme"], offline_mode: true }));
+
+    const mIn = new PassThrough();
+    const mOut = new PassThrough();
+    const mSrv = new ColdpinMcpServer({
+      operatorConfig: loadOperatorConfigFromEnv({
+        COLDPIN_ALLOWED_ROOTS: denseDir,
+        COLDPIN_POLICY_PATH: densePolicyPath,
+        COLDPIN_CACHE_DIR: ":memory:",
+      }),
+      input: mIn,
+      output: mOut,
+      errorOutput: new PassThrough(),
+      hijackProcessStdio: false,
+      hostCapabilities: {
+        node_version: process.version,
+        git_available: true,
+        git_partial_clone_supported: true,
+        rea_cli_available: false,
+        sqlite_available: true,
+      },
+    });
+    mSrv.start();
+    const replies: Array<Record<string, unknown>> = [];
+    let outBuf = "";
+    mOut.on("data", (d: Buffer) => {
+      outBuf += d.toString("utf8");
+      let nl = outBuf.indexOf("\n");
+      while (nl !== -1) {
+        const line = outBuf.slice(0, nl).trim();
+        outBuf = outBuf.slice(nl + 1);
+        if (line) replies.push(JSON.parse(line) as Record<string, unknown>);
+        nl = outBuf.indexOf("\n");
+      }
+    });
+    mIn.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } })}\n`);
+    mIn.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+    mIn.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "audit_manifest_batch", arguments: {} } })}\n`);
+    const deadline = Date.now() + 5000;
+    while (!replies.some((r) => r["id"] === 2) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    mIn.end();
+    await mSrv.shutdown();
+    const batchCallReply = replies.find((r) => r["id"] === 2)?.["result"] as
+      | { isError?: boolean; content?: Array<{ text: string }>; structuredContent?: { counts?: { flagged?: number } } }
+      | undefined;
+    const summaryBytes = batchCallReply?.content?.[0]?.text ? Buffer.byteLength(batchCallReply.content[0].text, "utf8") : 999999;
+    const flaggedTotal = batchCallReply?.structuredContent?.counts?.flagged ?? 0;
+    results.push({
+      id: "mut-29-batch-summary-token-cap",
+      passed: batchCallReply?.isError === false && summaryBytes <= 2000 && flaggedTotal === 25,
+      detail: `bytes=${summaryBytes}<=2000, flaggedTotal=${flaggedTotal}`,
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });

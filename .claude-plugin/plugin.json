@@ -1,6 +1,6 @@
 {
   "name": "coldpin",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Inspect npx packages cold in memory, verify tarball-to-source parity, and pin verified pre-compromise releases or clean alternatives with zero execution.",
   "author": {
     "name": "hynko431"

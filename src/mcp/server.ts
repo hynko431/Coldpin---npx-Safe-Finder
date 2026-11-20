@@ -15,6 +15,7 @@ import {
   parseFileUriToPath,
 } from "../core/path-confinement.ts";
 import {
+  runAuditManifestBatch,
   runAuditVerify,
   runDiscover,
   runInspect,
@@ -27,6 +28,7 @@ import {
   ENGINE_VERSION,
   type DiscoveryCardList,
   type HostCapabilities,
+  type ManifestBatchReport,
   type PackageInspectionReport,
   type SafeAnchorDecision,
 } from "../types.ts";
@@ -49,6 +51,7 @@ import {
 } from "./types.ts";
 
 const SUMMARY_MAX_BYTES = 6144;
+const BATCH_SUMMARY_MAX_BYTES = 2000;
 const FULL_PAYLOAD_HARD_CAP_BYTES = 48 * 1024;
 const DEFAULT_MAX_CONCURRENT = 4;
 const DEFAULT_MAX_QUEUE = 16;
@@ -372,6 +375,37 @@ function buildAnchorSummary(decision: SafeAnchorDecision, reportId: string): {
       unknowns: decision.unknowns.length,
     },
   }));
+}
+
+function buildBatchSummary(report: ManifestBatchReport, reportId: string): {
+  obj: Record<string, unknown>;
+  text: string;
+} {
+  return fitJsonSummaryWithinBudget(
+    (flagLim, unkLim, detailChars) => ({
+      schema_version: "1",
+      report_id: reportId,
+      manifest_path: truncateText(report.manifest_path, 120),
+      total_declared: report.total_declared,
+      evaluated_count: report.evaluated_count,
+      truncated_at_cap: report.truncated_at_cap,
+      offline_mode: report.offline_mode,
+      summary_counts: report.summary_counts,
+      top_flagged: report.flagged.slice(0, flagLim).map((f) => ({
+        package_name: truncateText(f.package_name, 72),
+        status: f.status,
+        route: f.route,
+        reason: truncateText(f.reasons[0] ?? "", Math.min(detailChars, 90)),
+        ...(f.advisory_ids.length > 0 ? { advisory_ids: f.advisory_ids.slice(0, 3) } : {}),
+      })),
+      unknowns: report.unknowns.slice(0, Math.min(unkLim, 4)).map((u) => truncateText(u, Math.min(detailChars, 100))),
+      counts: {
+        flagged: report.flagged.length,
+        unknowns: report.unknowns.length,
+      },
+    }),
+    BATCH_SUMMARY_MAX_BYTES,
+  );
 }
 
 function buildResourceConstraintResult(reportId: string, section: string, totalBytes: number): McpToolCallResult {
@@ -786,7 +820,9 @@ export class ColdpinMcpServer {
           ? buildInspectSummary(stored.report, reportId).text
           : stored.kind === "discover"
             ? buildDiscoverSummary(stored.report, reportId).text
-            : buildAnchorSummary(stored.decision, reportId).text;
+            : stored.kind === "batch"
+              ? buildBatchSummary(stored.report, reportId).text
+              : buildAnchorSummary(stored.decision, reportId).text;
       await this.transport.sendResult(id, {
         contents: [{ uri, mimeType: "application/json", text: summary }],
       });
@@ -992,6 +1028,16 @@ export class ColdpinMcpServer {
     if (toolName === "audit_verify") {
       assertAllowedKeys(args, ["audit_log_path"], toolName);
       readRequiredString(args, "audit_log_path", 1, 1024);
+      return;
+    }
+
+    if (toolName === "audit_manifest_batch") {
+      assertAllowedKeys(args, ["manifest_path", "include_dev", "max_deps", "offline", "detail"], toolName);
+      readOptionalString(args, "manifest_path", 1024, 1);
+      readOptionalBool(args, "include_dev");
+      readOptionalInt(args, "max_deps", 1, 50);
+      readOptionalBool(args, "offline");
+      readOptionalEnum(args, "detail", ["summary", "full"] as const, "summary");
       return;
     }
 
@@ -1210,6 +1256,31 @@ export class ColdpinMcpServer {
       };
     }
 
+    if (toolName === "audit_manifest_batch") {
+      const detail = readOptionalEnum(args, "detail", ["summary", "full"] as const, "summary");
+      const res = await runAuditManifestBatch(ctx, {
+        manifestPath: args["manifest_path"] as string | undefined,
+        includeDev: args["include_dev"] as boolean | undefined,
+        maxDeps: args["max_deps"] as number | undefined,
+        offline: args["offline"] as boolean | undefined,
+      });
+      if (!res.ok) {
+        return { content: [{ type: "text", text: res.error }], isError: true };
+      }
+      const reportId = this.reportStore.put({ kind: "batch", report: res.report });
+      if (detail === "full") {
+        const fullObj = { ...res.report, report_id: reportId };
+        const fullText = JSON.stringify(fullObj);
+        const bytes = Buffer.byteLength(fullText, "utf8");
+        if (bytes > FULL_PAYLOAD_HARD_CAP_BYTES) {
+          return buildResourceConstraintResult(reportId, "observations", bytes);
+        }
+        return { content: [{ type: "text", text: fullText }], structuredContent: fullObj, isError: false };
+      }
+      const { obj, text } = buildBatchSummary(res.report, reportId);
+      return { content: [{ type: "text", text }], structuredContent: obj, isError: false };
+    }
+
     return { content: [{ type: "text", text: `Unhandled tool: ${toolName}` }], isError: true };
   }
 
@@ -1253,12 +1324,14 @@ export class ColdpinMcpServer {
     if (section === "observations") {
       if (stored.kind === "inspect") items = stored.report.evidence.flatMap((e) => e.observations);
       else if (stored.kind === "discover") items = stored.report.candidates;
+      else if (stored.kind === "batch") items = stored.report.flagged;
       else items = stored.decision.evidence;
     } else if (section === "iocs") {
       items = stored.kind === "inspect" ? stored.report.iocs : [];
     } else if (section === "unknowns") {
       if (stored.kind === "inspect") items = stored.report.evidence.flatMap((e) => e.unknowns);
       else if (stored.kind === "discover") items = stored.report.unknowns;
+      else if (stored.kind === "batch") items = stored.report.unknowns;
       else items = stored.decision.unknowns;
     } else if (section === "commits") {
       items = stored.kind === "anchor" ? stored.decision.inspected_commits : [];

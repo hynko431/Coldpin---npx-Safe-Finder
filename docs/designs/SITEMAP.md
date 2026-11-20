@@ -4,7 +4,7 @@ Living index of checked-in technical specifications for `coldpin` (Coldpin; EGM 
 
 | Document | Status | Author | Last Updated | Scope |
 |---|---|---|---|---|
-| [coldpin.md](coldpin.md) | Approved | hynko431 | 2026-11-20 | Locked v1.3.0 architecture: zero-dep Node 24 CLI + local stdio MCP server (`lib/**/*.mjs`), lexical taint scoping & non-regex obfuscation calibration, provenance-aware 3-tier parity, Split-Plane SQLite DDL, and multi-marketplace manifests. |
+| [coldpin.md](coldpin.md) | Approved | hynko431 | 2026-11-21 | Locked v1.4.0 architecture: zero-dep Node 24+ CLI + local stdio MCP server (`lib/**/*.mjs`), 7 read-only MCP tools including `audit_manifest_batch`, lexical taint scoping & non-regex obfuscation calibration, provenance-aware 3-tier parity, Split-Plane SQLite DDL, and multi-marketplace manifests. |
 
 ## Related Verification & Governance Records
 

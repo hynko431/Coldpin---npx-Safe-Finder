@@ -18,6 +18,7 @@ const { defaultCacheDbPath, SplitPlaneCache } = await import("./cache/sqlite-sto
 const { logOperationalEvent } = await import("./compliance/audit-log.ts");
 const { loadNpmrc, loadPolicy, probeHostCapabilitiesAsync } = await import("./config/policy.ts");
 const {
+  runAuditManifestBatch,
   runAuditVerify,
   runDiscover,
   runInspect,
@@ -49,6 +50,7 @@ const BOOLEAN_FLAGS = new Set([
   "offline",
   "verbose",
   "check-public",
+  "include-dev",
   "help",
   "version",
 ]);
@@ -154,6 +156,7 @@ COMMANDS:
   inspect <pkg[@ver]>       Zero-exec tarball inspection, AST taint triage, parity & verdict card
   resolve-anchor <pkg>      Identify patient-zero commit and safe pre-compromise release/alternative
   verify-confusion [path]   Audit package.json & .npmrc for dependency confusion (T1195.001)
+  audit-batch [path]        Batch-screen up to 50 direct dependencies from package.json (squat/policy/OSV)
   audit-verify <jsonl>      Verify local hash-chained audit.jsonl integrity
   mcp                       Start local zero-dependency JSON-RPC 2.0 MCP server over stdio
 
@@ -168,7 +171,8 @@ COMMON FLAGS:
   --org <scope>             Filter by npm org/scope (discover)
   --creator <handle>        Filter by maintainer/creator (discover)
   --category <keyword>      Filter by capability/category keyword (discover)
-  --limit <n>               Max discovery results (default 10)
+  --limit <n>               Max discovery results (default 10) or batch deps (audit-batch, 1..50)
+  --include-dev             Include devDependencies in batch screening (audit-batch)
   --window <n>              Max commits to bisect (overrides policy bisect_max_commits)
   --policy <file>           Explicit .coldpin.policy.json path
   --cache-dir <dir>         Cache directory (or :memory:)
@@ -343,6 +347,52 @@ async function main(): Promise<ExitCode> {
         return res.exitCode;
       }
       process.stdout.write(`${JSON.stringify(res.report, null, 2)}\n`);
+      return res.exitCode;
+    }
+
+    if (parsed.command === "audit-batch") {
+      const limitStr = strFlag(parsed.flags, "limit");
+      let maxDeps: number | undefined;
+      if (limitStr !== undefined) {
+        const parsedLimit = Number(limitStr);
+        if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 50) {
+          process.stderr.write(`Error: --limit for audit-batch must be an integer between 1 and 50 (got '${limitStr}')\n`);
+          return 1;
+        }
+        maxDeps = parsedLimit;
+      }
+      const res = await runAuditManifestBatch(ctx, {
+        manifestPath: parsed.positionals[0],
+        includeDev: boolFlag(parsed.flags, "include-dev"),
+        maxDeps,
+        offline: boolFlag(parsed.flags, "offline"),
+      });
+      if (!res.ok) {
+        process.stderr.write(`${res.error}\n`);
+        return res.exitCode;
+      }
+      if (asJson) {
+        process.stdout.write(`${JSON.stringify(res.report, null, 2)}\n`);
+      } else {
+        const r = res.report;
+        const lines: string[] = [
+          `# Coldpin Batch Dependency Screening`,
+          `- Manifest: \`${r.manifest_path}\``,
+          `- Evaluated: ${r.evaluated_count} / ${r.total_declared}${r.truncated_at_cap ? " (capped)" : ""}`,
+          `- Clean screened: ${r.summary_counts.clean_screened} | Suspicious: ${r.summary_counts.flagged_suspicious} | Malicious/Blocked: ${r.summary_counts.malicious_or_blocked} | Unverifiable/Offline: ${r.summary_counts.unverifiable_offline}`,
+        ];
+        if (r.flagged.length > 0) {
+          lines.push("", "| Package | Status | Route | Primary Reason |", "| --- | --- | --- | --- |");
+          for (const f of r.flagged) {
+            const safeReason = (f.reasons[0] ?? "").replace(/\|/g, "\\|").slice(0, 120);
+            lines.push(`| \`${f.package_name}\` | ${f.status} | ${f.route} | ${safeReason} |`);
+          }
+        }
+        if (r.unknowns.length > 0) {
+          lines.push("", "## Unknowns", ...r.unknowns.map((u) => `- ${u}`));
+        }
+        process.stdout.write(`${lines.join("\n")}\n`);
+      }
       return res.exitCode;
     }
 

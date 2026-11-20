@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -9,6 +9,9 @@ import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 import { verifyTarballVsGitParity } from "../src/analysis/parity-and-bisect.ts";
 import { RULESET_SHA256, triageUnpackedEntries } from "../src/analysis/static-triage.ts";
 import { SingleFlight, SplitPlaneCache } from "../src/cache/sqlite-store.ts";
@@ -120,7 +123,7 @@ function createInProcessMcpHarness(envOverrides: NodeJS.ProcessEnv = {}): RpcHar
   };
 }
 
-describe("Coldpin Local Zero-Dependency MCP Server & v1.3.0 Security Suite", () => {
+describe("Coldpin Local Zero-Dependency MCP Server & v1.4.0 Security Suite", () => {
   it("enforces MCP 2025-11-25 lifecycle, roots/list sync, legacy fallback, batch rejection, chunked UTF-8/CRLF framing, and schema token pin", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "coldpin-mcp-life-"));
     try {
@@ -166,7 +169,7 @@ describe("Coldpin Local Zero-Dependency MCP Server & v1.3.0 Security Suite", () 
         // 5. tools/list schema budget <= 1,800 estimated tokens & matches rules/mcp-schema-pin.json
         const toolsRes = await h.request("tools/list", {}, 13);
         const toolsPayload = toolsRes["result"] as { tools: Array<{ name: string; inputSchema: Record<string, unknown> }> };
-        assert.equal(toolsPayload.tools.length, 6);
+        assert.equal(toolsPayload.tools.length, 7);
         const pinDisk = JSON.parse(readFileSync(resolve("rules/mcp-schema-pin.json"), "utf8")) as {
           catalog_sha256: string;
           estimated_tokens: number;
@@ -215,7 +218,7 @@ describe("Coldpin Local Zero-Dependency MCP Server & v1.3.0 Security Suite", () 
         const initL = await hLegacy.request("initialize", { protocolVersion: "2025-03-26" }, 1);
         assert.equal((initL["result"] as { protocolVersion: string }).protocolVersion, "2025-03-26");
         const listL = await hLegacy.request("tools/list", {}, 2);
-        assert.equal((listL["result"] as { tools: unknown[] }).tools.length, 6);
+        assert.equal((listL["result"] as { tools: unknown[] }).tools.length, 7);
       } finally {
         await hLegacy.close();
       }
@@ -669,6 +672,199 @@ describe("Coldpin Local Zero-Dependency MCP Server & v1.3.0 Security Suite", () 
       };
       assert.equal(compiledMod.RULESET_SHA256, RULESET_SHA256);
     } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces audit_manifest_batch 50-dep cap, private-scope OSV isolation, MAL/KEV/typosquat flagging, <=2000-byte summary, paging, and CLI audit-batch parity", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "coldpin-batch-"));
+    const rootDir = join(tmpDir, "workspace");
+    mkdirSync(rootDir, { recursive: true });
+
+    const queriedOsvNames = new Set<string>();
+    const osvServer = createServer((req, res) => {
+      const u = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (u.pathname === "/v1/querybatch" && req.method === "POST") {
+        let raw = "";
+        req.on("data", (chunk: Buffer) => {
+          raw += chunk.toString("utf8");
+        });
+        req.on("end", () => {
+          const parsed = JSON.parse(raw) as { queries: Array<{ package?: { name?: string } }> };
+          const results = parsed.queries.map((q) => {
+            const name = q.package?.name ?? "";
+            queriedOsvNames.add(name);
+            if (name === "evil-batch-pkg") return { vulns: [{ id: "MAL-2026-9999" }] };
+            if (name === "kev-batch-pkg") return { vulns: [{ id: "GHSA-kev-7777" }] };
+            return { vulns: [] };
+          });
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ results }));
+        });
+        return;
+      }
+      if (u.pathname === "/v1/vulns/MAL-2026-9999") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "MAL-2026-9999", summary: "Malicious batch dropper" }));
+        return;
+      }
+      if (u.pathname === "/v1/vulns/GHSA-kev-7777") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: "GHSA-kev-7777",
+            summary: "Known exploited batch vuln",
+            database_specific: { severity: "HIGH", cisa_kev: true },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((r) => osvServer.listen(0, "127.0.0.1", () => r()));
+
+    try {
+      const port = (osvServer.address() as AddressInfo).port;
+      const policyPath = join(tmpDir, "batch-policy.json");
+      writeFileSync(
+        policyPath,
+        JSON.stringify({
+          osv_api_url: `http://127.0.0.1:${port}`,
+          private_scopes: ["@internal"],
+          denied_orgs: ["@banned"],
+          block_on_kev: true,
+          offline_mode: false,
+        }),
+      );
+
+      const deps: Record<string, string> = {
+        "@banned/pkg": "1.0.0",
+        "@internal/secret-lib": "1.0.0",
+        "evil-batch-pkg": "1.2.3",
+        "kev-batch-pkg": "2.0.0",
+        lodahs: "1.0.0",
+      };
+      for (let i = 1; i <= 50; i++) {
+        deps[`z-clean-dep-${String(i).padStart(2, "0")}`] = "1.0.0";
+      }
+      const manifestPath = join(rootDir, "package.json");
+      writeFileSync(
+        manifestPath,
+        JSON.stringify({ name: "batch-demo", version: "1.0.0", dependencies: deps, devDependencies: { "z-dev-only": "1.0.0" } }),
+      );
+
+      const h = createInProcessMcpHarness({
+        COLDPIN_ALLOWED_ROOTS: rootDir,
+        COLDPIN_POLICY_PATH: policyPath,
+        COLDPIN_CACHE_DIR: ":memory:",
+      });
+      try {
+        await h.request("initialize", { protocolVersion: "2025-11-25", clientInfo: { name: "batch-test" } }, 1);
+        h.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+        // 1. Live batch triage against mocked local OSV server
+        const batchRes = await h.request("tools/call", { name: "audit_manifest_batch", arguments: {} }, 2);
+        const batchBody = batchRes["result"] as {
+          isError: boolean;
+          content: Array<{ text: string }>;
+          structuredContent: {
+            report_id: string;
+            total_declared: number;
+            evaluated_count: number;
+            truncated_at_cap: boolean;
+            summary_counts: {
+              clean_screened: number;
+              flagged_suspicious: number;
+              malicious_or_blocked: number;
+              unverifiable_offline: number;
+            };
+            top_flagged: Array<{ package_name: string; status: string }>;
+            counts: { flagged: number };
+          };
+        };
+        assert.equal(batchBody.isError, false);
+        const summaryBytes = Buffer.byteLength(batchBody.content[0]!.text, "utf8");
+        assert.ok(summaryBytes <= 2000, `Batch summary exceeded 2,000-byte / 500-token cap: ${summaryBytes} bytes`);
+        assert.equal(batchBody.structuredContent.total_declared, 55);
+        assert.equal(batchBody.structuredContent.evaluated_count, 50);
+        assert.equal(batchBody.structuredContent.truncated_at_cap, true);
+        assert.equal(batchBody.structuredContent.summary_counts.malicious_or_blocked, 4);
+        assert.equal(batchBody.structuredContent.summary_counts.flagged_suspicious, 1);
+        assert.equal(batchBody.structuredContent.summary_counts.clean_screened, 45);
+        assert.equal(batchBody.structuredContent.summary_counts.unverifiable_offline, 0);
+        assert.equal(batchBody.structuredContent.top_flagged[0]?.status, "MALICIOUS_OR_BLOCKED");
+
+        // Private & denied packages NEVER leak to OSV
+        assert.equal(queriedOsvNames.has("@internal/secret-lib"), false);
+        assert.equal(queriedOsvNames.has("@banned/pkg"), false);
+        assert.equal(queriedOsvNames.has("evil-batch-pkg"), true);
+        assert.equal(queriedOsvNames.has("kev-batch-pkg"), true);
+
+        // 2. Page full flagged list via get_artifact_report
+        const pageRes = await h.request(
+          "tools/call",
+          {
+            name: "get_artifact_report",
+            arguments: { report_id: batchBody.structuredContent.report_id, section: "observations", offset: 0, limit: 10 },
+          },
+          3,
+        );
+        const pageBody = pageRes["result"] as {
+          isError: boolean;
+          structuredContent: { total: number; items: Array<{ package_name: string; advisory_ids: string[] }> };
+        };
+        assert.equal(pageBody.isError, false);
+        assert.equal(pageBody.structuredContent.total, 5);
+        const flaggedNames = new Set(pageBody.structuredContent.items.map((x) => x.package_name));
+        assert.ok(flaggedNames.has("@banned/pkg"));
+        assert.ok(flaggedNames.has("@internal/secret-lib"));
+        assert.ok(flaggedNames.has("evil-batch-pkg"));
+        assert.ok(flaggedNames.has("kev-batch-pkg"));
+        assert.ok(flaggedNames.has("lodahs"));
+
+        // 3. Offline mode fails closed: unflagged deps become UNVERIFIABLE_OFFLINE (0 clean_screened)
+        const offRes = await h.request(
+          "tools/call",
+          { name: "audit_manifest_batch", arguments: { offline: true } },
+          4,
+        );
+        const offBody = offRes["result"] as {
+          isError: boolean;
+          structuredContent: {
+            summary_counts: { clean_screened: number; unverifiable_offline: number; malicious_or_blocked: number };
+          };
+        };
+        assert.equal(offBody.isError, false);
+        assert.equal(offBody.structuredContent.summary_counts.clean_screened, 0);
+        assert.equal(offBody.structuredContent.summary_counts.unverifiable_offline, 47);
+        assert.equal(offBody.structuredContent.summary_counts.malicious_or_blocked, 2);
+
+        // 4. Compiled CLI `lib/cli.mjs audit-batch` parity (async execFile so in-process osvServer stays responsive!)
+        let cliExit = 0;
+        let cliOut = "";
+        try {
+          const { stdout } = await execFileAsync(
+            process.execPath,
+            ["--no-warnings", resolve("lib/cli.mjs"), "audit-batch", manifestPath, "--policy", policyPath, "--cache-dir", ":memory:", "--json"],
+            { encoding: "utf8" },
+          );
+          cliOut = stdout;
+        } catch (err) {
+          const e = err as { code?: number; stdout?: string };
+          cliExit = typeof e.code === "number" ? e.code : 1;
+          cliOut = e.stdout ?? "";
+        }
+        assert.equal(cliExit, 3);
+        const cliJson = JSON.parse(cliOut) as { evaluated_count: number; truncated_at_cap: boolean; summary_counts: { malicious_or_blocked: number } };
+        assert.equal(cliJson.evaluated_count, 50);
+        assert.equal(cliJson.truncated_at_cap, true);
+        assert.equal(cliJson.summary_counts.malicious_or_blocked, 4);
+      } finally {
+        await h.close();
+      }
+    } finally {
+      osvServer.close();
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });

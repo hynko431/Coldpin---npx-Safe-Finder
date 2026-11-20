@@ -25,19 +25,22 @@ import {
 import { unpackTarballInMemory } from "../quarantine/safe-unpack.ts";
 import type {
   AdvisoryRecord,
+  BatchDependencyFinding,
   ConfusionReport,
   DiscoveryCardList,
   ExitCode,
   HostCapabilities,
+  ManifestBatchReport,
   Observation,
   PackageInspectionReport,
+  PackageManifest,
   PolicyConfig,
   ProvenanceStatus,
   SafeAnchorDecision,
   TriageResult,
 } from "../types.ts";
 import { assembleInspectionReport, verdictToExitCode } from "../verdict/engine-and-formatters.ts";
-import { openReadCappedFile, resolveConfinedPath } from "./path-confinement.ts";
+import { openReadCappedFile, redactHomePath, resolveConfinedPath } from "./path-confinement.ts";
 
 export type TelemetrySink = (event: Record<string, unknown>) => void;
 
@@ -898,4 +901,302 @@ export async function runAuditVerify(
 
   const result = verifyAuditLogContent(rawContent);
   return { ok: true, result, exitCode: result.valid ? 0 : 3 };
+}
+
+const MAX_BATCH_DEPS_CAP = 50;
+const MAX_BATCH_MANIFEST_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Deterministic concurrent batch dependency triage (`v1.4.0`, `audit_manifest_batch`):
+ * Screens up to 50 direct dependencies from a root-confined `package.json` locally at $0/mo
+ * using private-scope routing, 7-primitive squat screening, exact-range checks, and batched
+ * OSV/OpenSSF `MAL-*` lookups (reusing Split-Plane SQLite cache & SingleFlight).
+ */
+export async function runAuditManifestBatch(
+  ctx: WorkflowContext,
+  input: {
+    manifestPath?: string;
+    includeDev?: boolean;
+    maxDeps?: number;
+    offline?: boolean;
+  },
+): Promise<
+  | { ok: true; report: ManifestBatchReport; exitCode: ExitCode }
+  | { ok: false; error: string; exitCode: ExitCode; isOperationalError: boolean }
+> {
+  const policy: PolicyConfig =
+    input.offline && !ctx.policy.offline_mode ? { ...ctx.policy, offline_mode: true } : ctx.policy;
+
+  let resolvedManifestPath: string;
+  if (ctx.enforceRootConfinement) {
+    const rawTarget = input.manifestPath ?? (ctx.workspaceRoots[0] ? resolve(ctx.workspaceRoots[0], "package.json") : "");
+    if (!rawTarget) {
+      return {
+        ok: false,
+        error: "Local manifest_path access denied: no authorized workspace roots configured.",
+        exitCode: 1,
+        isOperationalError: true,
+      };
+    }
+    const confined = resolveConfinedPath(rawTarget, ctx.workspaceRoots, {
+      requireRegularFile: true,
+      rejectSymlink: true,
+      label: "manifest_path",
+    });
+    if (!confined.ok) {
+      return { ok: false, error: confined.error, exitCode: 1, isOperationalError: true };
+    }
+    resolvedManifestPath = confined.canonicalPath;
+  } else {
+    resolvedManifestPath = resolve(input.manifestPath ?? resolve(ctx.cwd ?? process.cwd(), "package.json"));
+  }
+
+  let pkg: PackageManifest;
+  try {
+    const rawBuf = await openReadCappedFile(resolvedManifestPath, MAX_BATCH_MANIFEST_BYTES, ctx.enforceRootConfinement);
+    pkg = JSON.parse(rawBuf.toString("utf8")) as PackageManifest;
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Failed reading manifest: ${err instanceof Error ? err.message : String(err)}`,
+      exitCode: 1,
+      isOperationalError: true,
+    };
+  }
+
+  const combined: Record<string, string> = {
+    ...(pkg.dependencies ?? {}),
+    ...(pkg.optionalDependencies ?? {}),
+    ...(input.includeDev ? (pkg.devDependencies ?? {}) : {}),
+  };
+  const allEntries = Object.entries(combined).sort(([a], [b]) => a.localeCompare(b));
+  const cap = Math.min(Math.max(Math.floor(input.maxDeps ?? MAX_BATCH_DEPS_CAP), 1), MAX_BATCH_DEPS_CAP);
+  const selected = allEntries.slice(0, cap);
+  const truncatedAtCap = allEntries.length > cap;
+
+  const unknowns: string[] = [];
+  if (truncatedAtCap) {
+    unknowns.push(`BATCH_CAP_REACHED: evaluated first ${cap} of ${allEntries.length} declared dependencies.`);
+  }
+
+  const exactVerRe = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+  const publicOsvTargets: Array<{ name: string; version?: string }> = [];
+  const privateOsvTargets: Array<{ name: string; version?: string }> = [];
+
+  interface DepWorkItem {
+    name: string;
+    range: string;
+    exactVer?: string;
+    route: BatchDependencyFinding["route"];
+    reasons: string[];
+    severityRank: number; // 0 = clean, 1 = suspicious, 2 = malicious/blocked
+  }
+
+  const items: DepWorkItem[] = [];
+  for (const [depName, rawRange] of selected) {
+    const range = typeof rawRange === "string" ? rawRange.trim() : "";
+    const exactVer = exactVerRe.test(range) ? range : undefined;
+    const routing = routeRegistry(depName, policy, ctx.npmrc);
+    const reasons: string[] = [];
+    let severityRank = 0;
+
+    if (
+      routing.route === "blocked_typo" ||
+      routing.route === "blocked_unconfigured" ||
+      routing.route === "blocked_secret"
+    ) {
+      severityRank = 2;
+      reasons.push(routing.reason);
+    } else {
+      const scope = depName.startsWith("@") ? depName.slice(0, depName.indexOf("/")).toLowerCase() : "unscoped";
+      if (policy.denied_orgs.includes(scope)) {
+        severityRank = 2;
+        reasons.push(`Org/scope '${scope}' is denied by policy.`);
+      } else if (policy.allowed_orgs.length > 0 && !policy.allowed_orgs.includes(scope)) {
+        severityRank = Math.max(severityRank, 1);
+        reasons.push(`Org/scope '${scope}' is not on policy allowed_orgs list.`);
+      }
+
+      const squatObs = evaluateSlopsquatAndCooldown({
+        package_name: depName,
+        has_lifecycle_scripts: false,
+        policy,
+      });
+      for (const obs of squatObs) {
+        if (obs.severity === "CRITICAL") severityRank = 2;
+        else if (obs.severity === "HIGH" || obs.severity === "MEDIUM") severityRank = Math.max(severityRank, 1);
+        reasons.push(`${obs.code}: ${obs.detail}`);
+      }
+
+      if (severityRank < 2) {
+        if (routing.route === "public") {
+          publicOsvTargets.push({ name: depName, ...(exactVer ? { version: exactVer } : {}) });
+        } else if (routing.route === "private") {
+          privateOsvTargets.push({ name: depName, ...(exactVer ? { version: exactVer } : {}) });
+        }
+      }
+    }
+
+    items.push({ name: depName, range, exactVer, route: routing.route, reasons, severityRank });
+  }
+
+  // Batch OSV queries separately by route (private scopes NEVER leak to public api.osv.dev)
+  const advisoriesByPkg = new Map<string, AdvisoryRecord[]>();
+  const recordAdvisories = (advs: AdvisoryRecord[]) => {
+    for (const adv of advs) {
+      const list = advisoriesByPkg.get(adv.package_name) ?? [];
+      list.push(adv);
+      advisoriesByPkg.set(adv.package_name, list);
+    }
+  };
+
+  let pubOsvUnavailable = policy.offline_mode;
+  let privOsvUnavailable = policy.offline_mode;
+
+  if (publicOsvTargets.length > 0) {
+    const pubOsv = await queryOsvAdvisories({
+      packages: publicOsvTargets,
+      policy,
+      cache: ctx.cache,
+      route: "public",
+    });
+    recordAdvisories(pubOsv.advisories);
+    unknowns.push(...pubOsv.unknowns);
+    if (pubOsv.unknowns.some((u) => u.startsWith("OSV_API_") || u.startsWith("OFFLINE_INTEL_"))) {
+      pubOsvUnavailable = true;
+    }
+  }
+  if (privateOsvTargets.length > 0) {
+    const privOsv = await queryOsvAdvisories({
+      packages: privateOsvTargets,
+      policy,
+      cache: ctx.cache,
+      route: "private",
+    });
+    recordAdvisories(privOsv.advisories);
+    unknowns.push(...privOsv.unknowns);
+    if (
+      privOsv.unknowns.some(
+        (u) => u.startsWith("PRIVATE_SCOPE_OSV_") || u.startsWith("OSV_API_") || u.startsWith("OFFLINE_INTEL_"),
+      )
+    ) {
+      privOsvUnavailable = true;
+    }
+  }
+
+  const flagged: BatchDependencyFinding[] = [];
+  const counts = {
+    clean_screened: 0,
+    flagged_suspicious: 0,
+    malicious_or_blocked: 0,
+    unverifiable_offline: 0,
+  };
+
+  for (const item of items) {
+    const advs = advisoriesByPkg.get(item.name) ?? [];
+    const advisoryIds: string[] = [];
+    for (const adv of advs) {
+      advisoryIds.push(adv.id);
+      if (adv.is_malicious) {
+        item.severityRank = 2;
+        item.reasons.push(`OSV_MALICIOUS (${adv.id}): ${adv.summary}`);
+      } else if (
+        (policy.block_on_kev && adv.kev) ||
+        (policy.block_on_critical_cve && adv.severity === "CRITICAL")
+      ) {
+        item.severityRank = 2;
+        item.reasons.push(`OSV_BLOCKING_ADVISORY (${adv.id}, ${adv.severity}${adv.kev ? "/KEV" : ""}): ${adv.summary}`);
+      } else if (policy.block_on_high_cve && adv.severity === "HIGH") {
+        item.severityRank = Math.max(item.severityRank, 1);
+        item.reasons.push(`OSV_HIGH_ADVISORY (${adv.id}): ${adv.summary}`);
+      }
+    }
+
+    let status: BatchDependencyFinding["status"];
+    if (item.severityRank >= 2) {
+      status = "MALICIOUS_OR_BLOCKED";
+      counts.malicious_or_blocked++;
+      flagged.push({
+        package_name: item.name,
+        declared_range: item.range,
+        route: item.route,
+        status,
+        reasons: item.reasons,
+        advisory_ids: advisoryIds,
+      });
+    } else if (item.severityRank === 1) {
+      status = "FLAGGED_SUSPICIOUS";
+      counts.flagged_suspicious++;
+      flagged.push({
+        package_name: item.name,
+        declared_range: item.range,
+        route: item.route,
+        status,
+        reasons: item.reasons,
+        advisory_ids: advisoryIds,
+      });
+    } else if ((item.route === "public" && pubOsvUnavailable) || (item.route === "private" && privOsvUnavailable)) {
+      status = "UNVERIFIABLE_OFFLINE";
+      counts.unverifiable_offline++;
+    } else {
+      status = "CLEAN_SCREENED";
+      counts.clean_screened++;
+    }
+  }
+
+  // Prioritize MALICIOUS_OR_BLOCKED ahead of FLAGGED_SUSPICIOUS so compact summaries always surface critical findings first
+  flagged.sort((a, b) => {
+    if (a.status !== b.status) return a.status === "MALICIOUS_OR_BLOCKED" ? -1 : 1;
+    return a.package_name.localeCompare(b.package_name);
+  });
+
+  const displayManifestPath = ctx.invokerSurface === "mcp" ? redactHomePath(resolvedManifestPath) : resolvedManifestPath;
+  const report: ManifestBatchReport = {
+    schema_version: "1",
+    manifest_path: displayManifestPath,
+    total_declared: allEntries.length,
+    evaluated_count: selected.length,
+    truncated_at_cap: truncatedAtCap,
+    offline_mode: policy.offline_mode,
+    summary_counts: counts,
+    flagged,
+    unknowns: Array.from(new Set(unknowns)),
+  };
+
+  if (ctx.auditLogPath) {
+    await appendAuditEventAsync(ctx.auditLogPath, {
+      request_id: ctx.requestId,
+      invoker_surface: ctx.invokerSurface,
+      ...(ctx.mcpClientName ? { mcp_client_name: ctx.mcpClientName } : {}),
+      ...(ctx.invokerSurface === "mcp" ? { tool_name: "audit_manifest_batch" } : {}),
+      action: "audit-manifest-batch",
+      target: displayManifestPath,
+      verdict:
+        counts.malicious_or_blocked > 0
+          ? "MALICIOUS_INDICATORS_FOUND"
+          : counts.flagged_suspicious > 0
+            ? "QUARANTINE_SUSPICIOUS"
+            : counts.unverifiable_offline > 0
+              ? "UNVERIFIABLE_UNKNOWN"
+              : "VERIFIED_CLEAN_WITHIN_SCOPE",
+      policy_sha256: ctx.policy_sha256,
+      evidence_ids: [],
+      ...(ctx.overrideTicketId ? { override_ticket_id: ctx.overrideTicketId } : {}),
+    });
+  }
+
+  emitTelemetry(ctx, {
+    stage: "audit_manifest_batch_complete",
+    evaluated: selected.length,
+    malicious_or_blocked: counts.malicious_or_blocked,
+    flagged_suspicious: counts.flagged_suspicious,
+  });
+
+  const exitCode: ExitCode =
+    counts.malicious_or_blocked > 0
+      ? 3
+      : counts.flagged_suspicious > 0 || counts.unverifiable_offline > 0
+        ? 2
+        : 0;
+  return { ok: true, report, exitCode };
 }
