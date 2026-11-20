@@ -2,7 +2,7 @@
 """Deep Enterprise Skill Hygiene, Reference, & URL Allow-List Validator
 (Enterprise Commons `tools/verify.py` parity).
 
-Checks across skill-src/coldpin/ and docs/:
+Checks across skills/coldpin/ and docs/:
 1. Zero UTF-8 BOM, zero hidden/bidi/Tag Unicode, zero ASCII control chars.
 2. Zero embedded prompt-injection or exploit-payload strings inside operational docs.
 3. Zero hardcoded secrets / credentialed URIs.
@@ -24,7 +24,7 @@ if sys.platform == "win32":
         pass
 
 ROOT = Path(__file__).resolve().parent.parent
-SKILL_DIR = ROOT / "skill-src" / "coldpin"
+SKILL_DIR = ROOT / "skills" / "coldpin"
 TODAY = datetime.date.today()
 
 HIDDEN_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u00ad\U000e0000-\U000e007f]")

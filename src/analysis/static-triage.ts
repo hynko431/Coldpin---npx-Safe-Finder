@@ -51,8 +51,12 @@ export function isSafeNpmBinName(bin: string): boolean {
 }
 
 function computeRulesetSha256(): string {
-  const manifestPath = resolve(import.meta.dirname, "..", "..", "rules", "triage-rules.json");
-  const raw = existsSync(manifestPath)
+  const candidates = [
+    resolve(import.meta.dirname, "..", "..", "rules", "triage-rules.json"),
+    resolve(import.meta.dirname, "..", "..", "..", "rules", "triage-rules.json"),
+  ];
+  const manifestPath = candidates.find((p) => existsSync(p));
+  const raw = manifestPath
     ? readFileSync(manifestPath, "utf8")
     : JSON.stringify(FALLBACK_RULESET_SPEC);
   return createHash("sha256").update(`v${ENGINE_VERSION}|${raw}`).digest("hex");

@@ -1,37 +1,38 @@
 # Harnesses & Cross-Platform Distribution
 
-`coldpin` maintains **one canonical skill source** under `skill-src/coldpin/`. No agent harness receives a forked copy of the skill prose; host-specific runtime packages are compiled deterministically from the same source tree by `scripts/pack_plugin.py`.
+`coldpin` maintains **one canonical skill source** under `skills/coldpin/` and **one compiled zero-dependency ESM runtime** under `lib/` (built deterministically from `src/` via `npm run build`). No agent harness receives a forked copy of the skill prose; host-specific runtime packages are compiled deterministically from the same source tree by `scripts/pack_plugin.py`.
 
 ## Install Matrix
 
-| Harness | Manifest | Skill Path | Install / Sync Command | Verification Status |
+| Harness | Manifest | Skill / MCP Entrypoint | Install / Sync Command | Verification Status |
 |---|---|---|---|---|
-| **Antigravity (Workspace / CLI / App / IDEs)** | `plugin.json` | `.agents/skills/coldpin/` (workspace) or `skills/coldpin/` (inside bundle / `~/.gemini/config/plugins/coldpin/`) | `python scripts/pack_plugin.py --target antigravity --verify --sync-workspace` | Workspace mirror + reproducible bundle + internal link check verified locally (`scripts/pack_plugin.py`) |
-| **Claude Code** | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` | `skills/coldpin/` (inside generated bundle) | `python scripts/pack_plugin.py --target claude --verify` | Manifest schema + reproducible archive verified; live Claude Code host trace not executed here |
-| **Codex CLI / ChatGPT Desktop** | `.codex-plugin/plugin.json`, `.agents/plugins/marketplace.json` | `skills/coldpin/` (inside generated bundle) | `python scripts/pack_plugin.py --target openai --verify` | Manifest schema + reproducible archive verified; live Codex host trace not executed here |
-| **Standalone Node.js 24 CLI / CI** | `package.json` | `src/cli.ts` | `node --no-warnings src/cli.ts --help` | End-to-end tests + benchmarks verified locally on Node `v24.1.0` |
+| **Antigravity (CLI / Workspace / App / IDEs)** | `plugin.json`, `mcp_config.json` | `skills/coldpin/` (repo & bundle) + `.agents/skills/coldpin/` (workspace mirror) + `${PLUGIN_ROOT}/lib/mcp.mjs` (`COLDPIN_CACHE_DIR=${PLUGIN_DATA}`) | `agy plugin install https://github.com/hynko431/Coldpin-npx-Safe-Finder` or `python scripts/pack_plugin.py --target antigravity --verify --sync-workspace` | Live `agy plugin validate --strict` (`skills: 1`, `mcpServers: 1`, `0` findings) + reproducible bundle verified locally |
+| **Claude Code** | `.claude-plugin/plugin.json` (inline `mcpServers`), `.claude-plugin/marketplace.json` | `skills/coldpin/` + `${CLAUDE_PLUGIN_ROOT}/lib/mcp.mjs` | `python scripts/pack_plugin.py --target claude --verify` | Manifest schema + reproducible archive verified; live Claude Code host trace not executed here |
+| **Codex CLI / ChatGPT Desktop** | `.codex-plugin/plugin.json`, `.agents/plugins/marketplace.json` | `skills/coldpin/` | `python scripts/pack_plugin.py --target openai --verify` | Manifest schema + reproducible archive verified; live Codex host trace not executed here |
+| **Official MCP Registry / npm / Cursor** | `server.json` (`2025-12-11`), `package.json` (`mcpName`) | `npx --ignore-scripts coldpin@1.3.0 mcp` (`lib/mcp.mjs`) | `npm install -g coldpin` or `npx --ignore-scripts coldpin@1.3.0 mcp` | Schema parity, `node_modules` execution smoke test, and JSON-RPC `stdio` MCP suite verified locally on Node `v24.1.0` |
+| **Standalone Node.js 24 CLI / CI** | `package.json` | `lib/cli.mjs` (or `src/cli.ts`) | `node --no-warnings lib/cli.mjs --help` | End-to-end tests + benchmarks verified locally on Node `v24.1.0` |
 
 ## Antigravity App and Antigravity for IDEs
 
-For workspace-scoped discovery inside this repository, run:
+For direct installation via the Antigravity CLI, run `agy plugin install https://github.com/hynko431/Coldpin-npx-Safe-Finder`. For workspace-scoped discovery inside this repository, run:
 
 ```sh
 python scripts/pack_plugin.py --verify --sync-workspace
 ```
 
-For machine-global installation without an external installer, build `dist/coldpin-antigravity.zip` locally or download the checksum-verified release archive + `SHA256SUMS.txt` from [GitHub Releases](https://github.com/hynko431/Coldpin---npx-Safe-Finder/releases), extract it into `~/.gemini/config/plugins/coldpin/` (remove any prior version first so stale files do not linger), then reload the window and verify `coldpin` appears in the skill/plugin list.
+For machine-global installation without an external installer, build `dist/coldpin-antigravity.zip` locally or download the checksum-verified release archive + `SHA256SUMS.txt` from [GitHub Releases](https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases), extract it into `~/.gemini/config/plugins/coldpin/` (remove any prior version first so stale files do not linger), then reload the window and verify `coldpin` appears in the skill/plugin list.
 
 ## Manifest Ownership & Drift Prevention
 
-- Root `plugin.json` is the single source of truth for plugin identity (`name`, `version`, `description`, `license`, `author`). Following Google EGM's multi-harness practice, `$schema` is intentionally omitted from root `plugin.json` so strict third-party validators (such as `omp`) do not reject portable extension fields.
-- `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`, `package.json`, `src/types.ts` (`ENGINE_VERSION`), `rules/triage-rules.json`, `skill-src/coldpin/SKILL.md`, and `skill-src/coldpin/skill-card.md` are validated automatically against root `plugin.json` by `scripts/lint_skill.py` (any metadata or version drift fails lint).
+- Root `plugin.json` is the single source of truth for plugin identity (`name`, `version`, `description`, `license`, `author`). Following Google EGM's multi-harness practice, `$schema` and `"mcpServers"` are omitted from root `plugin.json` (MCP registration lives in root `mcp_config.json` for Antigravity and inline inside `.claude-plugin/plugin.json` for Claude Code; no root `.mcp.json` or `mcp.json` is emitted).
+- `package.json`, `server.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`, `src/types.ts` (`ENGINE_VERSION`), `rules/triage-rules.json`, `rules/mcp-schema-pin.json`, `skills/coldpin/SKILL.md`, and `skills/coldpin/skill-card.md` are validated automatically against root `plugin.json` by `scripts/lint_skill.py` (any metadata or version drift fails lint).
 - Runtime packages generated by `scripts/pack_plugin.py` enforce:
   - Explicit allowlist only (excludes `.git/`, `.github/`, `tests/`, `node_modules/`, `audit.jsonl`, `*.sqlite`, temporary artifacts).
   - Zero symlinks, zero paths escaping repo root, zero automatic permission-approval hooks.
   - Sorted archive entries, fixed timestamp (`2026-01-01 00:00:00 UTC`), fixed POSIX mode bits (`0644`), and byte-for-byte SHA-256 verification across two consecutive builds.
-  - Relative Markdown link, HTML `href`/`src`, YAML asset, and `#heading-anchor` validation inside the packaged tree.
+  - Relative Markdown link, HTML `href`/`src`, YAML asset, MCP `${PLUGIN_ROOT}` target, and `#heading-anchor` validation inside the packaged tree.
 
 ## Host Execution Boundaries
 
-- Unlike pure-Markdown skills, `coldpin` requires a local shell executor capable of running `node` (`>= 24.0.0`) and `git` (`>= 2.25`). Cloud-only chat modes without local command execution cannot run `src/cli.ts` and must fail closed (`UNVERIFIABLE_UNKNOWN`) rather than guessing verdicts from package names.
+- Coldpin requires a local Node.js `>= 24.0.0` runtime (and `git >= 2.25` for Git parity/bisect). Cloud-only chat sessions without local process execution cannot run `lib/mcp.mjs` or `lib/cli.mjs` and must fail closed (`UNVERIFIABLE_UNKNOWN`) rather than guessing verdicts from package names.
 - Never install or enable automatic command-approval hooks for `coldpin`; the human user must explicitly approve any recommended `npx` command before execution.

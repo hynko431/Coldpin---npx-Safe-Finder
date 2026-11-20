@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Do **not** report security vulnerabilities, live malware URLs, or credentials here. Use [GitHub Private Vulnerability Reporting](https://github.com/hynko431/Coldpin---npx-Safe-Finder/security/advisories/new) for security issues.
+        Do **not** report security vulnerabilities, live malware URLs, or credentials here. Use [GitHub Private Vulnerability Reporting](https://github.com/hynko431/Coldpin-npx-Safe-Finder/security/advisories/new) for security issues.
 
   - type: textarea
     id: summary

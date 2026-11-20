@@ -56,7 +56,7 @@ describe("E2E: 3-Tier Tarball-vs-Git Parity, Patient-Zero Commit Bisect & CLI Ex
       ]);
       const unpackedCompiled = await unpackTarballInMemory(compiledTgz, DEFAULT_POLICY);
       const triagedCompiled = triageUnpackedEntries(unpackedCompiled.entries, DEFAULT_POLICY);
-      const parityCompiled = verifyTarballVsGitParity({
+      const parityCompiled = await verifyTarballVsGitParity({
         tarballManifest: triagedCompiled.manifest,
         tarballEntries: unpackedCompiled.entries,
         provenanceAttested: false,
@@ -82,7 +82,7 @@ describe("E2E: 3-Tier Tarball-vs-Git Parity, Patient-Zero Commit Bisect & CLI Ex
       ]);
       const unpackedDrifted = await unpackTarballInMemory(driftedTgz, DEFAULT_POLICY);
       const triagedDrifted = triageUnpackedEntries(unpackedDrifted.entries, DEFAULT_POLICY);
-      const parityDrifted = verifyTarballVsGitParity({
+      const parityDrifted = await verifyTarballVsGitParity({
         tarballManifest: triagedDrifted.manifest,
         tarballEntries: unpackedDrifted.entries,
         provenanceAttested: false,
@@ -110,7 +110,7 @@ describe("E2E: 3-Tier Tarball-vs-Git Parity, Patient-Zero Commit Bisect & CLI Ex
       const releaseMap = new Map([
         [commit2, { version: "1.1.0", tarball_sha512: unpackedCompiled.tarball_sha512, provenance_attested: true }],
       ]);
-      const decisionRollback = walkGitHistoryForCleanAnchor({
+      const decisionRollback = await walkGitHistoryForCleanAnchor({
         package_name: "@demo/tool",
         repoUrlOrLocalPath: repoDir,
         isLocalDir: true,
@@ -127,7 +127,7 @@ describe("E2E: 3-Tier Tarball-vs-Git Parity, Patient-Zero Commit Bisect & CLI Ex
       assert.ok(decisionRollback.inspected_commits.some((c) => c.cache_hits > 0));
 
       // --- Bisect Test 2: Commit 2 has NO verified npm tarball -> FORENSIC_COMMIT_ONLY (no unsafe npx github:...) ---
-      const decisionForensic = walkGitHistoryForCleanAnchor({
+      const decisionForensic = await walkGitHistoryForCleanAnchor({
         package_name: "@demo/tool",
         repoUrlOrLocalPath: repoDir,
         isLocalDir: true,
@@ -153,7 +153,7 @@ describe("E2E: 3-Tier Tarball-vs-Git Parity, Patient-Zero Commit Bisect & CLI Ex
           ],
         ],
       ]);
-      const decisionPivot = walkGitHistoryForCleanAnchor({
+      const decisionPivot = await walkGitHistoryForCleanAnchor({
         package_name: "@demo/tool",
         repoUrlOrLocalPath: repoDir,
         isLocalDir: true,

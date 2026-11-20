@@ -5,24 +5,34 @@ role: specialist
 workflows:
   discover:
     cli_verb: discover
+    mcp_tool: discover_packages
     input: PackageDiscoveryRequest
     output: DiscoveryCardList
   inspect:
     cli_verb: inspect
+    mcp_tool: inspect_package_artifact
     input: PackageArtifactRequest
     output: PackageInspectionReport
   resolve_anchor:
     cli_verb: resolve-anchor
+    mcp_tool: resolve_safe_anchor
     input: CompromisedPackageRef
     output: SafeAnchorDecision
   verify_confusion:
     cli_verb: verify-confusion
+    mcp_tool: verify_confusion
     input: WorkspaceManifestRef
     output: ConfusionReport
   audit_verify:
     cli_verb: audit-verify
+    mcp_tool: audit_verify
     input: AuditLogPathRef
     output: AuditVerificationResult
+  report_page:
+    cli_verb: mcp
+    mcp_tool: get_artifact_report
+    input: ReportPageRequest
+    output: PaginatedReportSlice
 input_artifacts:
   - PackageDiscoveryRequest
   - PackageArtifactRequest

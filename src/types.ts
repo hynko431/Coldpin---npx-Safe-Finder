@@ -1,4 +1,4 @@
-export const ENGINE_VERSION = "1.2.1";
+export const ENGINE_VERSION = "1.3.0";
 export const CACHE_SCHEMA_VERSION = "3";
 
 export type TrustVerdict =
@@ -327,6 +327,9 @@ export interface AuditEvent {
   seq: number;
   ts_utc: string;
   request_id?: string;
+  invoker_surface?: "cli" | "mcp";
+  mcp_client_name?: string;
+  tool_name?: string;
   actor_id_hash: string;
   action: "discover" | "inspect" | "resolve-anchor" | "verify-confusion";
   target: string;

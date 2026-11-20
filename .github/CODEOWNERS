@@ -1,16 +1,21 @@
 # Default repository owner
 * @hynko431
 
-# Security-critical inspection, quarantine, and threat-intelligence modules
+# Security-critical inspection, quarantine, pure-core, MCP, and threat-intelligence modules
 /src/quarantine/ @hynko431
 /src/analysis/ @hynko431
 /src/intel/ @hynko431
+/src/core/ @hynko431
+/src/mcp/ @hynko431
+/lib/ @hynko431
 
-# Detection-as-Code rules and SOC Sigma detections
+# Detection-as-Code rules, MCP schema pin, and SOC Sigma detections
 /rules/ @hynko431
 
-# Canonical agent skill instructions, runtime contract, and cryptographic signature
-/skill-src/coldpin/ @hynko431
+# Canonical agent skill instructions, runtime contract, MCP manifests, and cryptographic signature
+/skills/coldpin/ @hynko431
+/mcp_config.json @hynko431
+/server.json @hynko431
 
 # CI/CD workflows, release automation, and repository governance
 /.github/ @hynko431

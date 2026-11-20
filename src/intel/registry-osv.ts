@@ -1,5 +1,7 @@
-import { createPublicKey, verify as cryptoVerify, X509Certificate } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash, createPublicKey, verify as cryptoVerify, X509Certificate } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { existsSync } from "node:fs";
+import { isIP } from "node:net";
 import { dirname, resolve } from "node:path";
 import { SingleFlight, type SplitPlaneCache } from "../cache/sqlite-store.ts";
 import {
@@ -8,6 +10,7 @@ import {
   routeDiscoveryQuery,
   type NpmrcConfig,
 } from "../config/policy.ts";
+import { openReadCappedFile, redactHomePath } from "../core/path-confinement.ts";
 import {
   ENGINE_VERSION,
   type AdvisoryRecord,
@@ -26,6 +29,21 @@ import { evaluateSlopsquatAndCooldown } from "../discovery/slopsquat-guard.ts";
 
 const USER_AGENT = `coldpin/${ENGINE_VERSION}`;
 const osvDetailFlight = new SingleFlight<Record<string, unknown> | undefined>();
+const versionMetaFlight = new SingleFlight<{
+  ok: boolean;
+  meta?: RegistryVersionMetadata;
+  packument?: PackumentSummary;
+  error?: string;
+}>();
+const tarballFlight = new SingleFlight<{ ok: boolean; buffer?: Buffer; error?: string }>();
+const MAX_PACKUMENT_JSON_BYTES = 25 * 1024 * 1024;
+const MAX_SMALL_JSON_BYTES = 4 * 1024 * 1024;
+const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
+
+function hashAuthScope(token?: string): string {
+  return createHash("sha256").update(token ?? "anon").digest("hex").slice(0, 16);
+}
+
 const BLOCKED_METADATA_HOSTS = new Set([
   "169.254.169.254",
   "100.100.100.200",
@@ -47,6 +65,28 @@ function decodeMappedIpv4(host: string): string | null {
   return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
 }
 
+function parseIpv4Octets(ip: string): [number, number, number, number] | null {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  const nums = parts.map((p) => (/^\d+$/.test(p) ? Number(p) : -1));
+  if (nums.some((n) => n < 0 || n > 255)) return null;
+  return [nums[0]!, nums[1]!, nums[2]!, nums[3]!];
+}
+
+export function isPrivateOrReservedIpv4(ip: string): boolean {
+  const oct = parseIpv4Octets(ip);
+  if (!oct) return false;
+  const [a, b] = oct;
+  if (a === 0) return true; // 0.0.0.0/8 unspecified
+  if (a === 10) return true; // 10.0.0.0/8 RFC1918
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT
+  if (a === 127) return true; // 127.0.0.0/8 loopback
+  if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local / IMDS
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12 RFC1918
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16 RFC1918
+  return false;
+}
+
 function isMetadataOrLinkLocalHost(rawHost: string): boolean {
   const host = rawHost.toLowerCase().replace(/^\[|\]$/g, "");
   if (BLOCKED_METADATA_HOSTS.has(host) || host.startsWith("169.254.")) return true;
@@ -64,15 +104,27 @@ function isLoopbackHost(rawHost: string): boolean {
     host === "localhost" ||
     host.endsWith(".localhost") ||
     host.startsWith("127.") ||
+    host.startsWith("0.") ||
     host === "0.0.0.0" ||
     host === "::1" ||
     host === "::" ||
-    host === "0:0:0:0:0:0:0:1"
+    host === "0:0:0:0:0:0:0:1" ||
+    host === "0:0:0:0:0:0:0:0"
   ) {
     return true;
   }
   const mappedV4 = decodeMappedIpv4(host);
-  return Boolean(mappedV4 && (mappedV4.startsWith("127.") || mappedV4 === "0.0.0.0"));
+  return Boolean(mappedV4 && (mappedV4.startsWith("127.") || mappedV4.startsWith("0.")));
+}
+
+export function isPrivateOrReservedIp(rawHost: string): boolean {
+  const host = rawHost.toLowerCase().replace(/^\[|\]$/g, "");
+  if (isMetadataOrLinkLocalHost(host) || isLoopbackHost(host)) return true;
+  if (isPrivateOrReservedIpv4(host)) return true;
+  if (/^f[cd][0-9a-f]{2}:/.test(host)) return true; // IPv6 ULA fc00::/7
+  const mappedV4 = decodeMappedIpv4(host);
+  if (mappedV4 && isPrivateOrReservedIpv4(mappedV4)) return true;
+  return false;
 }
 
 function isPublicOsvUrl(rawUrl: string): boolean {
@@ -86,6 +138,7 @@ function isPublicOsvUrl(rawUrl: string): boolean {
 export function validateOutboundUrl(
   rawUrl: string,
   allowPlainHttpForExplicitOrigin?: string,
+  allowedPrivateOrigin?: string,
 ): { ok: boolean; parsed?: URL; error?: string } {
   let parsed: URL;
   try {
@@ -93,18 +146,27 @@ export function validateOutboundUrl(
   } catch {
     return { ok: false, error: `Malformed URL: ${rawUrl}` };
   }
+  if (parsed.username || parsed.password) {
+    return { ok: false, error: "Rejected outbound URL containing embedded credentials/userinfo." };
+  }
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (isMetadataOrLinkLocalHost(host)) {
     return { ok: false, error: `Blocked link-local/cloud metadata host '${host}' (SSRF defense).` };
   }
-  const matchesExplicitOrigin = Boolean(allowPlainHttpForExplicitOrigin && parsed.origin === allowPlainHttpForExplicitOrigin);
-  if (isLoopbackHost(host) && !matchesExplicitOrigin) {
+  const matchesExplicitHttp = Boolean(allowPlainHttpForExplicitOrigin && parsed.origin === allowPlainHttpForExplicitOrigin);
+  const matchesExplicitPrivate =
+    matchesExplicitHttp || Boolean(allowedPrivateOrigin && parsed.origin === allowedPrivateOrigin);
+
+  if (isLoopbackHost(host) && !matchesExplicitPrivate) {
     return { ok: false, error: `Blocked loopback/unspecified host '${host}' (SSRF defense).` };
+  }
+  if (isIP(host) !== 0 && isPrivateOrReservedIp(host) && !matchesExplicitPrivate) {
+    return { ok: false, error: `Blocked private/reserved IP host '${host}' (SSRF defense).` };
   }
   if (parsed.protocol === "https:") {
     return { ok: true, parsed };
   }
-  if (parsed.protocol === "http:" && matchesExplicitOrigin) {
+  if (parsed.protocol === "http:" && matchesExplicitHttp) {
     return { ok: true, parsed };
   }
   return {
@@ -113,38 +175,111 @@ export function validateOutboundUrl(
   };
 }
 
+async function verifyDnsNotSsrf(
+  host: string,
+  allowPrivateTarget: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  if (isIP(host) !== 0) return { ok: true };
+  try {
+    const records = await dnsLookup(host, { all: true });
+    for (const rec of records) {
+      if (isMetadataOrLinkLocalHost(rec.address)) {
+        return { ok: false, error: `DNS resolved '${host}' to blocked metadata/link-local address '${rec.address}'.` };
+      }
+      if (!allowPrivateTarget && isPrivateOrReservedIp(rec.address)) {
+        return { ok: false, error: `DNS resolved '${host}' to blocked private/reserved address '${rec.address}'.` };
+      }
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: `DNS lookup failed for '${host}': ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+export async function readResponseBytesCapped(
+  res: Response,
+  maxBytes: number,
+  label: string,
+): Promise<{ ok: true; buffer: Buffer } | { ok: false; error: string }> {
+  const contentLen = Number.parseInt(res.headers.get("content-length") ?? "", 10);
+  if (Number.isFinite(contentLen) && contentLen > maxBytes) {
+    return { ok: false, error: `${label} content-length (${contentLen}) exceeded limit (${maxBytes} bytes)` };
+  }
+  if (!res.body) return { ok: false, error: `Empty ${label} response body` };
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const reader = res.body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return { ok: false, error: `${label} response exceeded limit (${maxBytes} bytes)` };
+      }
+      chunks.push(Buffer.from(value));
+    }
+  }
+  return { ok: true, buffer: Buffer.concat(chunks, total) };
+}
+
 export async function fetchWithSafeRedirects(params: {
   url: string;
+  method?: "GET" | "POST";
+  body?: string;
   headers: Record<string, string>;
   authToken?: string;
   allowedAuthOrigin?: string;
   allowPlainHttpOrigin?: string;
+  allowedPrivateOrigin?: string;
   signal: AbortSignal;
 }): Promise<{ ok: boolean; response?: Response; error?: string }> {
+  const method = params.method ?? "GET";
   let currentUrl = params.url;
   for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
-    const check = validateOutboundUrl(currentUrl, params.allowPlainHttpOrigin);
+    const check = validateOutboundUrl(currentUrl, params.allowPlainHttpOrigin, params.allowedPrivateOrigin);
     if (!check.ok || !check.parsed) {
       return { ok: false, error: check.error };
     }
+    const host = check.parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const allowPrivateTarget =
+      Boolean(params.allowPlainHttpOrigin && check.parsed.origin === params.allowPlainHttpOrigin) ||
+      Boolean(params.allowedPrivateOrigin && check.parsed.origin === params.allowedPrivateOrigin);
+    const dnsCheck = await verifyDnsNotSsrf(host, allowPrivateTarget);
+    if (!dnsCheck.ok) {
+      return { ok: false, error: dnsCheck.error };
+    }
+
     const reqHeaders: Record<string, string> = { connection: "close" };
-    // Strip sensitive credential headers case-insensitively before setting origin-scoped auth (CWE-200)
+    // Strip sensitive credential headers case-insensitively before setting origin-scoped HTTPS-only auth (CWE-200)
     for (const [k, v] of Object.entries(params.headers)) {
       const kl = k.toLowerCase();
       if (kl === "authorization" || kl === "proxy-authorization" || kl === "cookie") continue;
       reqHeaders[k] = v;
     }
-    if (params.authToken && params.allowedAuthOrigin && check.parsed.origin === params.allowedAuthOrigin) {
+    // Security [MCP-09]: strictly require HTTPS + exact origin match before attaching Bearer token
+    if (
+      params.authToken &&
+      params.allowedAuthOrigin &&
+      check.parsed.protocol === "https:" &&
+      check.parsed.origin === params.allowedAuthOrigin
+    ) {
       reqHeaders["authorization"] = `Bearer ${params.authToken}`;
     }
 
     const res = await fetch(currentUrl, {
+      method,
       headers: reqHeaders,
+      ...(method === "POST" && params.body !== undefined ? { body: params.body } : {}),
       redirect: "manual",
       signal: params.signal,
     });
 
     if (res.status >= 300 && res.status < 400) {
+      if (method === "POST") {
+        return { ok: false, error: `Refused HTTP ${res.status} redirect on POST request.` };
+      }
       const location = res.headers.get("location");
       if (!location) return { ok: false, error: `Redirect HTTP ${res.status} without Location header` };
       try {
@@ -701,6 +836,7 @@ export async function inspectNpmAttestationBundle(params: {
       authToken: params.authToken,
       allowedAuthOrigin: params.allowedAuthOrigin,
       allowPlainHttpOrigin: allowHttpOrigin,
+      allowedPrivateOrigin: params.allowedAuthOrigin,
       signal: controller.signal,
     });
     if (!fetched.ok || !fetched.response) {
@@ -726,43 +862,21 @@ export async function inspectNpmAttestationBundle(params: {
         ],
       };
     }
-    if (!res.body) {
+    const readRes = await readResponseBytesCapped(res, MAX_ATTESTATION_BYTES, "Attestation");
+    if (!readRes.ok) {
       return {
         status: "metadata_url_only",
         provenance_url: params.attestationUrl,
         provenance_attested: false,
         observations: [],
         unknowns: [
-          "PROVENANCE_ATTESTATION_FETCH_FAILED: attestation endpoint returned empty body; Sigstore/SLSA provenance is NOT verified.",
+          `PROVENANCE_ATTESTATION_FETCH_FAILED: ${readRes.error}; Sigstore/SLSA provenance is NOT verified.`,
         ],
       };
     }
-    const chunks: Buffer[] = [];
-    let total = 0;
-    const reader = res.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) {
-        total += value.byteLength;
-        if (total > MAX_ATTESTATION_BYTES) {
-          await reader.cancel();
-          return {
-            status: "metadata_url_only",
-            provenance_url: params.attestationUrl,
-            provenance_attested: false,
-            observations: [],
-            unknowns: [
-              `PROVENANCE_ATTESTATION_FETCH_FAILED: attestation response exceeded ${MAX_ATTESTATION_BYTES} bytes; Sigstore/SLSA provenance is NOT verified.`,
-            ],
-          };
-        }
-        chunks.push(Buffer.from(value));
-      }
-    }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      parsed = JSON.parse(readRes.buffer.toString("utf8"));
     } catch {
       return {
         status: "metadata_url_only",
@@ -801,23 +915,24 @@ async function fetchJsonWithTimeout<T>(
   headers: Record<string, string>,
   timeoutMs = 12000,
   auth?: { token?: string; allowedOrigin?: string },
+  opts?: {
+    maxBytes?: number;
+    allowPlainHttpOrigin?: string;
+    allowedPrivateOrigin?: string;
+  },
 ): Promise<{ ok: boolean; status: number; data?: T; error?: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    let allowHttpOrigin: string | undefined;
-    try {
-      const p = new URL(url);
-      if (p.protocol === "http:") allowHttpOrigin = p.origin;
-    } catch {
-      allowHttpOrigin = undefined;
-    }
+    // Security [MCP-09]: never auto-set allowPlainHttpOrigin from untrusted `url`;
+    // only honor explicit server/policy-configured origins passed by caller.
     const fetched = await fetchWithSafeRedirects({
       url,
       headers,
       authToken: auth?.token,
       allowedAuthOrigin: auth?.allowedOrigin,
-      allowPlainHttpOrigin: allowHttpOrigin,
+      allowPlainHttpOrigin: opts?.allowPlainHttpOrigin,
+      allowedPrivateOrigin: opts?.allowedPrivateOrigin,
       signal: controller.signal,
     });
     if (!fetched.ok || !fetched.response) {
@@ -825,7 +940,12 @@ async function fetchJsonWithTimeout<T>(
     }
     const res = fetched.response;
     if (!res.ok) return { ok: false, status: res.status, error: `HTTP ${res.status}` };
-    const data = (await res.json()) as T;
+    const maxBytes = opts?.maxBytes ?? MAX_SMALL_JSON_BYTES;
+    const readRes = await readResponseBytesCapped(res, maxBytes, "JSON");
+    if (!readRes.ok) {
+      return { ok: false, status: res.status, error: readRes.error };
+    }
+    const data = JSON.parse(readRes.buffer.toString("utf8")) as T;
     return { ok: true, status: res.status, data };
   } catch (err) {
     return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
@@ -840,53 +960,50 @@ export async function fetchTarballBuffer(
   authToken?: string,
   timeoutMs = 20000,
   allowedAuthOrigin?: string,
+  callerSignal?: AbortSignal,
 ): Promise<{ ok: boolean; buffer?: Buffer; error?: string }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const flightKey = `${tarballUrl}|${maxBytes}|${hashAuthScope(authToken)}`;
   try {
-    let allowHttpOrigin: string | undefined;
-    if (allowedAuthOrigin && allowedAuthOrigin.startsWith("http://")) {
-      allowHttpOrigin = allowedAuthOrigin;
-    }
-    const fetched = await fetchWithSafeRedirects({
-      url: tarballUrl,
-      headers: { "user-agent": USER_AGENT },
-      authToken,
-      allowedAuthOrigin,
-      allowPlainHttpOrigin: allowHttpOrigin,
-      signal: controller.signal,
-    });
-    if (!fetched.ok || !fetched.response) {
-      return { ok: false, error: fetched.error ?? "Failed downloading tarball" };
-    }
-    const res = fetched.response;
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status} downloading tarball` };
-    const contentLen = Number.parseInt(res.headers.get("content-length") ?? "", 10);
-    if (Number.isFinite(contentLen) && contentLen > maxBytes) {
-      return { ok: false, error: `Tarball content-length (${contentLen}) exceeded max_compressed_bytes (${maxBytes})` };
-    }
-    if (!res.body) return { ok: false, error: "Empty response body" };
-
-    const chunks: Buffer[] = [];
-    let total = 0;
-    const reader = res.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) {
-        total += value.byteLength;
-        if (total > maxBytes) {
-          await reader.cancel();
-          return { ok: false, error: `Tarball download exceeded max_compressed_bytes (${maxBytes})` };
+    const shared = await tarballFlight.run(
+      flightKey,
+      async () => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const allowHttpOrigin =
+            allowedAuthOrigin && allowedAuthOrigin.startsWith("http://") ? allowedAuthOrigin : undefined;
+          const fetched = await fetchWithSafeRedirects({
+            url: tarballUrl,
+            headers: { "user-agent": USER_AGENT },
+            authToken,
+            allowedAuthOrigin,
+            allowPlainHttpOrigin: allowHttpOrigin,
+            allowedPrivateOrigin: allowedAuthOrigin,
+            signal: controller.signal,
+          });
+          if (!fetched.ok || !fetched.response) {
+            return { ok: false, error: fetched.error ?? "Failed downloading tarball" };
+          }
+          const res = fetched.response;
+          if (!res.ok) return { ok: false, error: `HTTP ${res.status} downloading tarball` };
+          const readRes = await readResponseBytesCapped(res, maxBytes, "Tarball");
+          if (!readRes.ok) return { ok: false, error: readRes.error };
+          return { ok: true, buffer: readRes.buffer };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        } finally {
+          clearTimeout(timer);
         }
-        chunks.push(Buffer.from(value));
-      }
+      },
+      callerSignal,
+    );
+    // Return an isolated Buffer copy to each waiter so mutations cannot leak across concurrent requests
+    if (shared.ok && shared.buffer) {
+      return { ok: true, buffer: Buffer.from(shared.buffer) };
     }
-    return { ok: true, buffer: Buffer.concat(chunks) };
+    return shared;
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -895,93 +1012,165 @@ export async function fetchVersionMetadata(params: {
   version?: string;
   registry_url: string;
   auth_token?: string;
+  signal?: AbortSignal;
 }): Promise<{ ok: boolean; meta?: RegistryVersionMetadata; packument?: PackumentSummary; error?: string }> {
-  const headers: Record<string, string> = {
-    "user-agent": USER_AGENT,
-    accept: "application/json",
-  };
-  let registryOrigin: string | undefined;
+  const flightKey = `${params.registry_url}|${params.package_name}|${params.version ?? "latest"}|${hashAuthScope(params.auth_token)}`;
   try {
-    registryOrigin = new URL(params.registry_url).origin;
-  } catch {
-    return { ok: false, error: `Invalid registry URL: ${params.registry_url}` };
-  }
-  const auth = params.auth_token ? { token: params.auth_token, allowedOrigin: registryOrigin } : undefined;
+    return await versionMetaFlight.run(
+      flightKey,
+      async () => {
+        const headers: Record<string, string> = {
+          "user-agent": USER_AGENT,
+          accept: "application/json",
+        };
+        let parsedReg: URL;
+        try {
+          parsedReg = new URL(params.registry_url);
+        } catch {
+          return { ok: false, error: `Invalid registry URL: ${params.registry_url}` };
+        }
+        const registryOrigin = parsedReg.origin;
+        const allowHttpOrigin = parsedReg.protocol === "http:" ? registryOrigin : undefined;
+        const auth = params.auth_token ? { token: params.auth_token, allowedOrigin: registryOrigin } : undefined;
+        const netOpts = {
+          maxBytes: MAX_PACKUMENT_JSON_BYTES,
+          allowPlainHttpOrigin: allowHttpOrigin,
+          allowedPrivateOrigin: registryOrigin,
+        };
 
-  const baseUrl = `${params.registry_url}/${encodePkgName(params.package_name)}`;
-  // Fetch packument first so time[ver] (cooldown), time.created (slopsquat age), dist-tags, and release history
-  // are ALWAYS preserved even when an explicit @version is inspected!
-  const res = await fetchJsonWithTimeout<Record<string, unknown>>(baseUrl, headers, 12000, auth);
+        const baseUrl = `${params.registry_url}/${encodePkgName(params.package_name)}`;
+        // Fetch packument first so time[ver] (cooldown), time.created (slopsquat age), dist-tags, and release history
+        // are ALWAYS preserved even when an explicit @version is inspected!
+        const res = await fetchJsonWithTimeout<Record<string, unknown>>(baseUrl, headers, 12000, auth, netOpts);
 
-  if (res.ok && res.data) {
-    const doc = res.data;
-    const distTags = (doc["dist-tags"] ?? {}) as Record<string, string>;
-    const versions = (doc["versions"] ?? {}) as Record<string, Record<string, unknown>>;
-    const timeMap = (doc["time"] ?? {}) as Record<string, string>;
-    const latestVer = distTags["latest"];
-    const requestedVer =
-      params.version && params.version !== "latest"
-        ? (versions[params.version] ? params.version : distTags[params.version])
-        : latestVer;
+        if (res.ok && res.data) {
+          const doc = res.data;
+          const distTags = (doc["dist-tags"] ?? {}) as Record<string, string>;
+          const versions = (doc["versions"] ?? {}) as Record<string, Record<string, unknown>>;
+          const timeMap = (doc["time"] ?? {}) as Record<string, string>;
+          const latestVer = distTags["latest"];
+          const requestedVer =
+            params.version && params.version !== "latest"
+              ? (versions[params.version] ? params.version : distTags[params.version])
+              : latestVer;
 
-    const buildMeta = (ver: string, vObj: Record<string, unknown>): RegistryVersionMetadata => {
-      const dist = (vObj["dist"] ?? {}) as Record<string, unknown>;
-      const repo = extractRepo(vObj["repository"] ?? doc["repository"]);
-      const provUrl = extractProvenanceUrl(vObj);
-      return {
-        name: String(vObj["name"] ?? params.package_name),
-        version: ver,
-        tarball_url: String(dist["tarball"] ?? ""),
-        integrity: typeof dist["integrity"] === "string" ? dist["integrity"] : undefined,
-        git_head: typeof vObj["gitHead"] === "string" ? vObj["gitHead"] : undefined,
-        repository_url: repo.url,
-        repository_directory: repo.directory,
-        // Packument dist.attestations.url alone is unverified metadata, never cryptographic Sigstore attestation
-        provenance_attested: false,
-        provenance_status: provUrl ? "metadata_url_only" : "none",
-        provenance_url: provUrl,
-        published_at: timeMap[ver],
-        created_at: timeMap["created"],
-        license: extractLicense(vObj["license"] ?? doc["license"]),
-        creator: extractCreator(vObj["author"] ?? vObj["_npmUser"]),
-        description: sanitizeUntrustedText(String(vObj["description"] ?? doc["description"] ?? ""), 220),
-        keywords: Array.isArray(vObj["keywords"] ?? doc["keywords"])
-          ? ((vObj["keywords"] ?? doc["keywords"]) as unknown[])
-              .filter((k): k is string => typeof k === "string")
-              .slice(0, 10)
-          : [],
-        scripts:
-          vObj["scripts"] && typeof vObj["scripts"] === "object"
-            ? (vObj["scripts"] as Record<string, string>)
-            : {},
-        dependencies:
-          vObj["dependencies"] && typeof vObj["dependencies"] === "object"
-            ? (vObj["dependencies"] as Record<string, string>)
-            : {},
-        optional_dependencies:
-          vObj["optionalDependencies"] && typeof vObj["optionalDependencies"] === "object"
-            ? (vObj["optionalDependencies"] as Record<string, string>)
-            : {},
-        bin_names: extractBinNames(params.package_name, vObj["bin"]),
-      };
-    };
+          const buildMeta = (ver: string, vObj: Record<string, unknown>): RegistryVersionMetadata => {
+            const dist = (vObj["dist"] ?? {}) as Record<string, unknown>;
+            const repo = extractRepo(vObj["repository"] ?? doc["repository"]);
+            const provUrl = extractProvenanceUrl(vObj);
+            return {
+              name: String(vObj["name"] ?? params.package_name),
+              version: ver,
+              tarball_url: String(dist["tarball"] ?? ""),
+              integrity: typeof dist["integrity"] === "string" ? dist["integrity"] : undefined,
+              git_head: typeof vObj["gitHead"] === "string" ? vObj["gitHead"] : undefined,
+              repository_url: repo.url,
+              repository_directory: repo.directory,
+              // Packument dist.attestations.url alone is unverified metadata, never cryptographic Sigstore attestation
+              provenance_attested: false,
+              provenance_status: provUrl ? "metadata_url_only" : "none",
+              provenance_url: provUrl,
+              published_at: timeMap[ver],
+              created_at: timeMap["created"],
+              license: extractLicense(vObj["license"] ?? doc["license"]),
+              creator: extractCreator(vObj["author"] ?? vObj["_npmUser"]),
+              description: sanitizeUntrustedText(String(vObj["description"] ?? doc["description"] ?? ""), 220),
+              keywords: Array.isArray(vObj["keywords"] ?? doc["keywords"])
+                ? ((vObj["keywords"] ?? doc["keywords"]) as unknown[])
+                    .filter((k): k is string => typeof k === "string")
+                    .slice(0, 10)
+                : [],
+              scripts:
+                vObj["scripts"] && typeof vObj["scripts"] === "object"
+                  ? (vObj["scripts"] as Record<string, string>)
+                  : {},
+              dependencies:
+                vObj["dependencies"] && typeof vObj["dependencies"] === "object"
+                  ? (vObj["dependencies"] as Record<string, string>)
+                  : {},
+              optional_dependencies:
+                vObj["optionalDependencies"] && typeof vObj["optionalDependencies"] === "object"
+                  ? (vObj["optionalDependencies"] as Record<string, string>)
+                  : {},
+              bin_names: extractBinNames(params.package_name, vObj["bin"]),
+            };
+          };
 
-    if (requestedVer && versions[requestedVer]) {
-      const targetMeta = buildMeta(requestedVer, versions[requestedVer]!);
-      const latestMeta = latestVer && versions[latestVer] ? buildMeta(latestVer, versions[latestVer]!) : targetMeta;
-      const versionsDesc = Object.entries(versions)
-        .map(([ver, vObj]) => {
+          if (requestedVer && versions[requestedVer]) {
+            const targetMeta = buildMeta(requestedVer, versions[requestedVer]!);
+            const latestMeta = latestVer && versions[latestVer] ? buildMeta(latestVer, versions[latestVer]!) : targetMeta;
+            const versionsDesc = Object.entries(versions)
+              .map(([ver, vObj]) => {
+                const dist = (vObj["dist"] ?? {}) as Record<string, unknown>;
+                const provUrl = extractProvenanceUrl(vObj);
+                return {
+                  version: ver,
+                  published_at: timeMap[ver],
+                  tarball_url: String(dist["tarball"] ?? ""),
+                  integrity: typeof dist["integrity"] === "string" ? dist["integrity"] : undefined,
+                  git_head: typeof vObj["gitHead"] === "string" ? vObj["gitHead"] : undefined,
+                  provenance_attested: false,
+                  provenance_status: provUrl ? ("metadata_url_only" as const) : ("none" as const),
+                  provenance_url: provUrl,
+                  dependencies:
+                    vObj["dependencies"] && typeof vObj["dependencies"] === "object"
+                      ? (vObj["dependencies"] as Record<string, string>)
+                      : {},
+                  optional_dependencies:
+                    vObj["optionalDependencies"] && typeof vObj["optionalDependencies"] === "object"
+                      ? (vObj["optionalDependencies"] as Record<string, string>)
+                      : {},
+                };
+              })
+              .sort((a, b) => Date.parse(b.published_at ?? "0") - Date.parse(a.published_at ?? "0"))
+              .slice(0, 30);
+
+            return {
+              ok: true,
+              meta: targetMeta,
+              packument: {
+                name: latestMeta.name,
+                latest_version: latestVer ?? requestedVer,
+                created_at: timeMap["created"],
+                versions_desc: versionsDesc,
+                latest_meta: latestMeta,
+              },
+            };
+          }
+        }
+
+        // Fallback to single-version endpoint if packument omitted the explicit version or returned error
+        if (params.version && params.version !== "latest") {
+          const singleUrl = `${baseUrl}/${encodeURIComponent(params.version)}`;
+          const single = await fetchJsonWithTimeout<Record<string, unknown>>(singleUrl, headers, 12000, auth, netOpts);
+          if (!single.ok || !single.data) {
+            return { ok: false, error: single.error ?? res.error ?? "Failed to fetch version metadata" };
+          }
+          const vObj = single.data;
           const dist = (vObj["dist"] ?? {}) as Record<string, unknown>;
+          const repo = extractRepo(vObj["repository"]);
           const provUrl = extractProvenanceUrl(vObj);
-          return {
-            version: ver,
-            published_at: timeMap[ver],
+          const meta: RegistryVersionMetadata = {
+            name: String(vObj["name"] ?? params.package_name),
+            version: String(vObj["version"] ?? params.version),
             tarball_url: String(dist["tarball"] ?? ""),
             integrity: typeof dist["integrity"] === "string" ? dist["integrity"] : undefined,
             git_head: typeof vObj["gitHead"] === "string" ? vObj["gitHead"] : undefined,
+            repository_url: repo.url,
+            repository_directory: repo.directory,
             provenance_attested: false,
-            provenance_status: provUrl ? ("metadata_url_only" as const) : ("none" as const),
+            provenance_status: provUrl ? "metadata_url_only" : "none",
             provenance_url: provUrl,
+            license: extractLicense(vObj["license"]),
+            creator: extractCreator(vObj["author"] ?? vObj["_npmUser"]),
+            description: sanitizeUntrustedText(String(vObj["description"] ?? ""), 220),
+            keywords: Array.isArray(vObj["keywords"])
+              ? vObj["keywords"].filter((k): k is string => typeof k === "string").slice(0, 10)
+              : [],
+            scripts:
+              vObj["scripts"] && typeof vObj["scripts"] === "object"
+                ? (vObj["scripts"] as Record<string, string>)
+                : {},
             dependencies:
               vObj["dependencies"] && typeof vObj["dependencies"] === "object"
                 ? (vObj["dependencies"] as Record<string, string>)
@@ -990,71 +1179,18 @@ export async function fetchVersionMetadata(params: {
               vObj["optionalDependencies"] && typeof vObj["optionalDependencies"] === "object"
                 ? (vObj["optionalDependencies"] as Record<string, string>)
                 : {},
+            bin_names: extractBinNames(params.package_name, vObj["bin"]),
           };
-        })
-        .sort((a, b) => Date.parse(b.published_at ?? "0") - Date.parse(a.published_at ?? "0"))
-        .slice(0, 30);
+          return { ok: true, meta };
+        }
 
-      return {
-        ok: true,
-        meta: targetMeta,
-        packument: {
-          name: latestMeta.name,
-          latest_version: latestVer ?? requestedVer,
-          created_at: timeMap["created"],
-          versions_desc: versionsDesc,
-          latest_meta: latestMeta,
-        },
-      };
-    }
+        return { ok: false, error: res.error ?? `No 'latest' version found for ${params.package_name}` };
+      },
+      params.signal,
+    );
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-
-  // Fallback to single-version endpoint if packument omitted the explicit version or returned error
-  if (params.version && params.version !== "latest") {
-    const singleUrl = `${baseUrl}/${encodeURIComponent(params.version)}`;
-    const single = await fetchJsonWithTimeout<Record<string, unknown>>(singleUrl, headers, 12000, auth);
-    if (!single.ok || !single.data) {
-      return { ok: false, error: single.error ?? res.error ?? "Failed to fetch version metadata" };
-    }
-    const vObj = single.data;
-    const dist = (vObj["dist"] ?? {}) as Record<string, unknown>;
-    const repo = extractRepo(vObj["repository"]);
-    const provUrl = extractProvenanceUrl(vObj);
-    const meta: RegistryVersionMetadata = {
-      name: String(vObj["name"] ?? params.package_name),
-      version: String(vObj["version"] ?? params.version),
-      tarball_url: String(dist["tarball"] ?? ""),
-      integrity: typeof dist["integrity"] === "string" ? dist["integrity"] : undefined,
-      git_head: typeof vObj["gitHead"] === "string" ? vObj["gitHead"] : undefined,
-      repository_url: repo.url,
-      repository_directory: repo.directory,
-      provenance_attested: false,
-      provenance_status: provUrl ? "metadata_url_only" : "none",
-      provenance_url: provUrl,
-      license: extractLicense(vObj["license"]),
-      creator: extractCreator(vObj["author"] ?? vObj["_npmUser"]),
-      description: sanitizeUntrustedText(String(vObj["description"] ?? ""), 220),
-      keywords: Array.isArray(vObj["keywords"])
-        ? vObj["keywords"].filter((k): k is string => typeof k === "string").slice(0, 10)
-        : [],
-      scripts:
-        vObj["scripts"] && typeof vObj["scripts"] === "object"
-          ? (vObj["scripts"] as Record<string, string>)
-          : {},
-      dependencies:
-        vObj["dependencies"] && typeof vObj["dependencies"] === "object"
-          ? (vObj["dependencies"] as Record<string, string>)
-          : {},
-      optional_dependencies:
-        vObj["optionalDependencies"] && typeof vObj["optionalDependencies"] === "object"
-          ? (vObj["optionalDependencies"] as Record<string, string>)
-          : {},
-      bin_names: extractBinNames(params.package_name, vObj["bin"]),
-    };
-    return { ok: true, meta };
-  }
-
-  return { ok: false, error: res.error ?? `No 'latest' version found for ${params.package_name}` };
 }
 
 function mapOsvSeverity(vuln: Record<string, unknown>): Severity {
@@ -1087,26 +1223,30 @@ export async function queryOsvAdvisories(params: {
   }
   if (params.packages.length === 0) return { advisories: [], unknowns };
 
-  let osvExplicitOrigin: string | undefined;
+  let osvConfiguredOrigin: string;
+  let osvExplicitHttpOrigin: string | undefined;
   try {
     const parsedOsv = new URL(osvBaseUrl);
-    if (parsedOsv.protocol === "http:") osvExplicitOrigin = parsedOsv.origin;
+    osvConfiguredOrigin = parsedOsv.origin;
+    if (parsedOsv.protocol === "http:") osvExplicitHttpOrigin = parsedOsv.origin;
   } catch {
     unknowns.push(`OSV_API_ERROR: invalid osv_api_url '${osvBaseUrl}'`);
     return { advisories: [], unknowns };
   }
   const batchUrl = `${osvBaseUrl}/v1/querybatch`;
-  const batchCheck = validateOutboundUrl(batchUrl, osvExplicitOrigin);
+  const batchCheck = validateOutboundUrl(batchUrl, osvExplicitHttpOrigin, osvConfiguredOrigin);
   if (!batchCheck.ok) {
     unknowns.push(`OSV_API_ERROR: ${batchCheck.error ?? "rejected OSV URL"}`);
     return { advisories: [], unknowns };
   }
 
+  // Security [MCP-13]: namespace BOTH batch and detail OSV cache/SingleFlight keys by sha256(osvBaseUrl)
+  const osvNs = createHash("sha256").update(osvBaseUrl).digest("hex").slice(0, 16);
   const advisories: AdvisoryRecord[] = [];
   const toQuery: Array<{ name: string; version?: string; key: string }> = [];
 
   for (const p of params.packages) {
-    const key = `osv:npm:${p.name}@${p.version ?? "*"}`;
+    const key = `osv:${osvNs}:npm:${p.name}@${p.version ?? "*"}`;
     const cached = params.cache?.getThreatIntel<AdvisoryRecord[]>(key);
     if (cached && !cached.stale) {
       advisories.push(...cached.data);
@@ -1120,23 +1260,37 @@ export async function queryOsvAdvisories(params: {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 12000);
   try {
-    const res = await fetch(batchUrl, {
+    const fetched = await fetchWithSafeRedirects({
+      url: batchUrl,
       method: "POST",
-      headers: { "content-type": "application/json", "user-agent": USER_AGENT, connection: "close" },
-      redirect: "manual",
+      headers: { "content-type": "application/json", "user-agent": USER_AGENT },
       body: JSON.stringify({
         queries: toQuery.map((q) => ({
           package: { ecosystem: "npm", name: q.name },
           ...(q.version ? { version: q.version } : {}),
         })),
       }),
+      allowPlainHttpOrigin: osvExplicitHttpOrigin,
+      allowedPrivateOrigin: osvConfiguredOrigin,
       signal: controller.signal,
     });
+    if (!fetched.ok || !fetched.response) {
+      unknowns.push(`OSV_API_UNAVAILABLE: ${fetched.error ?? "fetch failed"}`);
+      return { advisories, unknowns };
+    }
+    const res = fetched.response;
     if (!res.ok) {
       unknowns.push(`OSV_API_UNAVAILABLE: HTTP ${res.status}`);
       return { advisories, unknowns };
     }
-    const body = (await res.json()) as { results?: Array<{ vulns?: Array<{ id?: string }> }> };
+    const readRes = await readResponseBytesCapped(res, MAX_SMALL_JSON_BYTES, "OSV batch");
+    if (!readRes.ok) {
+      unknowns.push(`OSV_API_ERROR: ${readRes.error}`);
+      return { advisories, unknowns };
+    }
+    const body = JSON.parse(readRes.buffer.toString("utf8")) as {
+      results?: Array<{ vulns?: Array<{ id?: string }> }>;
+    };
     const results = body.results ?? [];
 
     for (let i = 0; i < toQuery.length; i++) {
@@ -1148,7 +1302,7 @@ export async function queryOsvAdvisories(params: {
       for (const v of vulns.slice(0, 10)) {
         const vid = v.id;
         if (!vid) continue;
-        const detailKey = `osv-vuln:${vid}`;
+        const detailKey = `osv-vuln:${osvNs}:${vid}`;
         const cachedDetail = params.cache?.getThreatIntel<Record<string, unknown>>(detailKey);
         let detailObj = cachedDetail && !cachedDetail.stale ? cachedDetail.data : undefined;
         if (!detailObj) {
@@ -1157,6 +1311,12 @@ export async function queryOsvAdvisories(params: {
               `${osvBaseUrl}/v1/vulns/${encodeURIComponent(vid)}`,
               { "user-agent": USER_AGENT },
               8000,
+              undefined,
+              {
+                maxBytes: MAX_SMALL_JSON_BYTES,
+                allowPlainHttpOrigin: osvExplicitHttpOrigin,
+                allowedPrivateOrigin: osvConfiguredOrigin,
+              },
             );
             if (detRes.ok && detRes.data) {
               params.cache?.putThreatIntel({
@@ -1216,8 +1376,15 @@ export async function discoverPackages(params: {
   const blocked_candidates: Array<{ package_name: string; reason: string }> = [];
 
   const routeTarget = params.org ? (params.org.startsWith("@") ? params.org : `@${params.org}`) : params.query;
-  const routing = routeDiscoveryQuery(params.query, params.org, params.policy, params.npmrc);
-  if (routing.route === "blocked_typo" || routing.route === "blocked_unconfigured") {
+  const routing = routeDiscoveryQuery(params.query, params.org, params.policy, params.npmrc, {
+    creator: params.creator,
+    category: params.category,
+  });
+  if (
+    routing.route === "blocked_typo" ||
+    routing.route === "blocked_unconfigured" ||
+    routing.route === "blocked_secret"
+  ) {
     return {
       schema_version: "1",
       query: params.query,
@@ -1254,8 +1421,11 @@ export async function discoverPackages(params: {
   const searchUrl = `${routing.registry_url}/-/v1/search?text=${encodeURIComponent(searchText)}&size=${size}`;
   const headers: Record<string, string> = { "user-agent": USER_AGENT };
   let searchOrigin: string | undefined;
+  let searchAllowHttpOrigin: string | undefined;
   try {
-    searchOrigin = new URL(routing.registry_url).origin;
+    const parsedSearch = new URL(routing.registry_url);
+    searchOrigin = parsedSearch.origin;
+    if (parsedSearch.protocol === "http:") searchAllowHttpOrigin = parsedSearch.origin;
   } catch {
     searchOrigin = undefined;
   }
@@ -1265,6 +1435,11 @@ export async function discoverPackages(params: {
     headers,
     12000,
     routing.auth_token && searchOrigin ? { token: routing.auth_token, allowedOrigin: searchOrigin } : undefined,
+    {
+      maxBytes: MAX_SMALL_JSON_BYTES,
+      allowPlainHttpOrigin: searchAllowHttpOrigin,
+      allowedPrivateOrigin: searchOrigin,
+    },
   );
   if (!res.ok || !res.data) {
     unknowns.push(`DISCOVERY_SEARCH_FAILED: ${res.error ?? "upstream registry error"}`);
@@ -1384,36 +1559,42 @@ export async function auditDependencyConfusion(params: {
   manifestPath?: string;
   policy: PolicyConfig;
   checkPublicClaimability?: boolean;
+  redactHomePaths?: boolean;
 }): Promise<ConfusionReport> {
   const manifestPath = resolve(params.manifestPath ?? resolve(params.cwd, "package.json"));
   const npmrc = loadNpmrc(dirname(manifestPath));
+  const displayManifestPath = params.redactHomePaths ? redactHomePath(manifestPath) : manifestPath;
+  const displayNpmrcPaths = params.redactHomePaths
+    ? npmrc.paths_loaded.map((p) => redactHomePath(p))
+    : npmrc.paths_loaded;
   const findings: ConfusionFinding[] = [];
   const unknowns: string[] = [];
 
   if (!existsSync(manifestPath)) {
     return {
       schema_version: "1",
-      manifest_path: manifestPath,
-      npmrc_paths: npmrc.paths_loaded,
+      manifest_path: displayManifestPath,
+      npmrc_paths: displayNpmrcPaths,
       findings: [],
       passed: false,
-      unknowns: [`Manifest not found at ${manifestPath}`],
+      unknowns: [`Manifest not found at ${displayManifestPath}`],
     };
   }
 
   let pkg: PackageManifest & { peerDependencies?: Record<string, string> };
   try {
-    pkg = JSON.parse(readFileSync(manifestPath, "utf8")) as PackageManifest & {
+    const rawBuf = await openReadCappedFile(manifestPath, MAX_MANIFEST_BYTES);
+    pkg = JSON.parse(rawBuf.toString("utf8")) as PackageManifest & {
       peerDependencies?: Record<string, string>;
     };
   } catch (err) {
     return {
       schema_version: "1",
-      manifest_path: manifestPath,
-      npmrc_paths: npmrc.paths_loaded,
+      manifest_path: displayManifestPath,
+      npmrc_paths: displayNpmrcPaths,
       findings: [],
       passed: false,
-      unknowns: [`MANIFEST_PARSE_ERROR: failed to parse ${manifestPath}: ${err instanceof Error ? err.message : String(err)}`],
+      unknowns: [`MANIFEST_PARSE_ERROR: failed to parse ${displayManifestPath}: ${err instanceof Error ? err.message : String(err)}`],
     };
   }
 
@@ -1460,6 +1641,8 @@ export async function auditDependencyConfusion(params: {
           `https://registry.npmjs.org/${encodePkgName(depName)}`,
           { "user-agent": USER_AGENT, accept: "application/vnd.npm.install-v1+json" },
           6000,
+          undefined,
+          { maxBytes: MAX_SMALL_JSON_BYTES },
         );
         if (probe.status === 404) {
           findings.push({
@@ -1486,8 +1669,8 @@ export async function auditDependencyConfusion(params: {
 
   return {
     schema_version: "1",
-    manifest_path: manifestPath,
-    npmrc_paths: npmrc.paths_loaded,
+    manifest_path: displayManifestPath,
+    npmrc_paths: displayNpmrcPaths,
     findings,
     passed: findings.length === 0 && unknowns.length === 0,
     unknowns,

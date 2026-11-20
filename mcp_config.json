@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "coldpin": {
+      "command": "node",
+      "args": ["--no-warnings", "${PLUGIN_ROOT}/lib/mcp.mjs"],
+      "env": {
+        "COLDPIN_CACHE_DIR": "${PLUGIN_DATA}"
+      }
+    }
+  }
+}

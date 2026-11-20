@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { readCappedRegularFileSync } from "../core/path-confinement.ts";
 import type {
   AdvisoryRecord,
   DiscoveryCardList,
@@ -271,11 +272,13 @@ export function checkLocalWorkspaceCompromised(
 ): PackageInspectionReport["local_workspace_compromised"] | undefined {
   if (verdict !== "MALICIOUS_INDICATORS_FOUND") return undefined;
 
+  const MAX_LOCKFILE_BYTES = 25 * 1024 * 1024;
+
   // 1. npm package-lock.json (lockfileVersion 1, 2, 3 — top-level AND nested node_modules)
   const npmLockPath = join(cwd, "package-lock.json");
   if (existsSync(npmLockPath)) {
     try {
-      const raw = JSON.parse(readFileSync(npmLockPath, "utf8")) as {
+      const raw = JSON.parse(readCappedRegularFileSync(npmLockPath, MAX_LOCKFILE_BYTES).toString("utf8")) as {
         packages?: Record<string, { version?: string }>;
         dependencies?: Record<string, { version?: string; dependencies?: Record<string, { version?: string }> }>;
       };
@@ -316,7 +319,7 @@ export function checkLocalWorkspaceCompromised(
   const pnpmLockPath = join(cwd, "pnpm-lock.yaml");
   if (existsSync(pnpmLockPath)) {
     try {
-      const matchedVer = matchPnpmLock(readFileSync(pnpmLockPath, "utf8"), packageName);
+      const matchedVer = matchPnpmLock(readCappedRegularFileSync(pnpmLockPath, MAX_LOCKFILE_BYTES).toString("utf8"), packageName);
       if (matchedVer) {
         return {
           lockfile_path: pnpmLockPath,
@@ -326,7 +329,7 @@ export function checkLocalWorkspaceCompromised(
         };
       }
     } catch {
-      // Ignore unreadable lockfile
+      // Ignore unreadable or oversized lockfile
     }
   }
 
@@ -334,7 +337,7 @@ export function checkLocalWorkspaceCompromised(
   const yarnLockPath = join(cwd, "yarn.lock");
   if (existsSync(yarnLockPath)) {
     try {
-      const matchedVer = matchYarnLock(readFileSync(yarnLockPath, "utf8"), packageName);
+      const matchedVer = matchYarnLock(readCappedRegularFileSync(yarnLockPath, MAX_LOCKFILE_BYTES).toString("utf8"), packageName);
       if (matchedVer) {
         return {
           lockfile_path: yarnLockPath,
@@ -767,7 +770,7 @@ export function formatSarif210(report: PackageInspectionReport): Record<string, 
           driver: {
             name: "coldpin",
             version: ENGINE_VERSION,
-            informationUri: "https://github.com/hynko431/coldpin",
+            informationUri: "https://github.com/hynko431/Coldpin-npx-Safe-Finder",
             rules: Array.from(rulesMap.values()),
           },
         },

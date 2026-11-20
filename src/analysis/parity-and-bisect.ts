@@ -1,10 +1,11 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { buildFactCacheKey, type SplitPlaneCache } from "../cache/sqlite-store.ts";
-import type { ProvenanceInspectionResult } from "../intel/registry-osv.ts";
+import { isPrivateOrReservedIp, type ProvenanceInspectionResult } from "../intel/registry-osv.ts";
 import type {
   AdvisoryRecord,
   CommitAuditSummary,
@@ -32,6 +33,8 @@ import {
   type ModuleTaintSummary,
 } from "./static-triage.ts";
 
+const execFileAsync = promisify(execFile);
+
 const SAFE_GIT_CONFIG_ARGS = [
   "-c",
   "core.fsmonitor=false",
@@ -42,19 +45,64 @@ const SAFE_GIT_CONFIG_ARGS = [
   "-c",
   "protocol.https.allow=always",
   "-c",
+  "http.followRedirects=false",
+  "-c",
   "credential.helper=",
   "-c",
   "diff.external=",
 ];
 
-const SAFE_GIT_ENV: NodeJS.ProcessEnv = {
-  ...process.env,
-  GIT_TERMINAL_PROMPT: "0",
-  GIT_CONFIG_NOSYSTEM: "1",
-};
+const ALLOWLISTED_GIT_ENV_KEYS = [
+  "PATH",
+  "Path",
+  "PATHEXT",
+  "SYSTEMROOT",
+  "SystemRoot",
+  "COMSPEC",
+  "ComSpec",
+  "WINDIR",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "HOME",
+  "USERPROFILE",
+  "LANG",
+  "LC_ALL",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_EXTRA_CA_CERTS",
+] as const;
+
+function buildSafeGitEnv(): NodeJS.ProcessEnv {
+  // Security [MCP-09]: never spread full process.env (prevents leaking GITHUB_TOKEN, AWS_*, NPM_TOKEN to git subprocesses)
+  const env: NodeJS.ProcessEnv = {
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+  };
+  for (const key of ALLOWLISTED_GIT_ENV_KEYS) {
+    const val = process.env[key];
+    if (val !== undefined) env[key] = val;
+  }
+  return env;
+}
+
+const ACTIVE_GIT_TEMP_DIRS = new Set<string>();
+
+export function cleanupActiveGitTempDirs(): void {
+  for (const dir of Array.from(ACTIVE_GIT_TEMP_DIRS)) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best-effort shutdown cleanup
+    }
+    ACTIVE_GIT_TEMP_DIRS.delete(dir);
+  }
+}
 
 function isBlockedRemoteGitHost(rawHost: string): boolean {
   const host = rawHost.toLowerCase().replace(/^\[|\]$/g, "");
+  if (isPrivateOrReservedIp(host)) return true;
   if (
     host === "localhost" ||
     host.endsWith(".localhost") ||
@@ -69,13 +117,14 @@ function isBlockedRemoteGitHost(rawHost: string): boolean {
   ) {
     return true;
   }
-  // IPv4 loopback, link-local/metadata, unspecified, RFC1918 private ranges
+  // IPv4 loopback, link-local/metadata, unspecified, RFC1918, CGNAT 100.64.0.0/10
   if (
     host.startsWith("127.") ||
+    host.startsWith("0.") ||
     host.startsWith("169.254.") ||
     host.startsWith("10.") ||
     host.startsWith("192.168.") ||
-    host === "0.0.0.0" ||
+    /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host) ||
     /^172\.(?:1[6-9]|2\d|3[01])\./.test(host)
   ) {
     return true;
@@ -84,7 +133,6 @@ function isBlockedRemoteGitHost(rawHost: string): boolean {
   if (/^fe[89ab][0-9a-f]:/.test(host) || /^f[cd][0-9a-f]{2}:/.test(host)) {
     return true;
   }
-  // IPv4-mapped IPv6 (both dotted ::ffff:127.0.0.1 and Node-normalized hex ::ffff:7f00:1 / ::ffff:a9fe:a9fe)
   if (host.startsWith("::ffff:")) {
     const mapped = host.slice("::ffff:".length);
     if (mapped.includes(".")) return isBlockedRemoteGitHost(mapped);
@@ -104,8 +152,8 @@ function isBlockedRemoteGitHost(rawHost: string): boolean {
 
 export function validateRemoteGitUrl(rawUrl: string): { valid: boolean; reason?: string } {
   const trimmed = rawUrl.trim();
-  if (!trimmed || trimmed.startsWith("-") || /[\x00-\x1f\s]/.test(trimmed)) {
-    return { valid: false, reason: "Invalid or option-like Git URL rejected (CWE-88 defense)." };
+  if (!trimmed || trimmed.length > 256 || trimmed.startsWith("-") || /[\x00-\x1f\s]/.test(trimmed)) {
+    return { valid: false, reason: "Invalid, oversized (>256 chars), or option-like Git URL rejected (CWE-88 defense)." };
   }
   if (/^ext::/i.test(trimmed)) {
     return { valid: false, reason: "Git ext:: remote helper protocol is forbidden." };
@@ -118,6 +166,13 @@ export function validateRemoteGitUrl(rawUrl: string): { valid: boolean; reason?:
   }
   if (parsed.protocol !== "https:") {
     return { valid: false, reason: `Remote Git protocol '${parsed.protocol}' rejected; only https:// is permitted.` };
+  }
+  // Security [MCP-04]: reject query strings, fragments, and embedded userinfo to prevent exfil beacons
+  if (parsed.username || parsed.password) {
+    return { valid: false, reason: "Remote Git URL with embedded userinfo/credentials is forbidden." };
+  }
+  if (parsed.search || trimmed.includes("?") || parsed.hash || trimmed.includes("#")) {
+    return { valid: false, reason: "Remote Git URL query parameters and fragments are forbidden." };
   }
   const host = parsed.hostname.toLowerCase();
   if (isBlockedRemoteGitHost(host)) {
@@ -138,17 +193,23 @@ export function validateGitSubdir(subdir: string): boolean {
   return !subdir.split("/").some((seg) => seg === ".." || seg === ".");
 }
 
-function runGit(args: string[], cwd: string, timeoutMs = 15000): { ok: boolean; stdout: string; stderr: string } {
+async function runGit(
+  args: string[],
+  cwd: string,
+  timeoutMs = 15000,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   try {
-    const stdout = execFileSync("git", [...SAFE_GIT_CONFIG_ARGS, ...args], {
+    const { stdout, stderr } = await execFileAsync("git", [...SAFE_GIT_CONFIG_ARGS, ...args], {
       cwd,
       encoding: "utf8",
-      env: SAFE_GIT_ENV,
-      stdio: ["ignore", "pipe", "pipe"],
+      env: buildSafeGitEnv(),
       timeout: timeoutMs,
       maxBuffer: 24 * 1024 * 1024,
+      windowsHide: true,
+      ...(signal ? { signal } : {}),
     });
-    return { ok: true, stdout, stderr: "" };
+    return { ok: true, stdout, stderr: stderr ?? "" };
   } catch (err) {
     const e = err as { stderr?: string | Buffer; message?: string };
     return {
@@ -159,30 +220,41 @@ function runGit(args: string[], cwd: string, timeoutMs = 15000): { ok: boolean; 
   }
 }
 
-function runGitBuffer(args: string[], cwd: string, timeoutMs = 15000): Buffer | null {
+async function runGitBuffer(
+  args: string[],
+  cwd: string,
+  timeoutMs = 15000,
+  signal?: AbortSignal,
+): Promise<Buffer | null> {
   try {
-    return execFileSync("git", [...SAFE_GIT_CONFIG_ARGS, ...args], {
+    // CRITICAL: explicit `encoding: "buffer"` is mandatory under promisify(execFile)
+    // because default encoding is "utf8" (unlike execFileSync), which corrupts binary .wasm/.node blobs!
+    const { stdout } = await execFileAsync("git", [...SAFE_GIT_CONFIG_ARGS, ...args], {
       cwd,
-      env: SAFE_GIT_ENV,
-      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "buffer",
+      env: buildSafeGitEnv(),
       timeout: timeoutMs,
       maxBuffer: 16 * 1024 * 1024,
+      windowsHide: true,
+      ...(signal ? { signal } : {}),
     });
+    return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
   } catch {
     return null;
   }
 }
 
-export function extractCommitDirectDependencies(
+export async function extractCommitDirectDependencies(
   localGitDir: string,
   commitSha: string,
   subdir?: string,
-): { deps: Array<{ name: string; version?: string; isFloating: boolean }>; binName?: string } {
+  signal?: AbortSignal,
+): Promise<{ deps: Array<{ name: string; version?: string; isFloating: boolean }>; binName?: string }> {
   if (!validateGitRef(commitSha) || (subdir && !validateGitSubdir(subdir))) {
     return { deps: [] };
   }
   const prefix = subdir ? `${subdir.replace(/^\/+|\/+$/g, "")}/` : "";
-  const buf = runGitBuffer(["show", `${commitSha}:${prefix}package.json`], localGitDir);
+  const buf = await runGitBuffer(["show", `${commitSha}:${prefix}package.json`], localGitDir, 15000, signal);
   if (!buf) return { deps: [] };
   try {
     const pkg = JSON.parse(buf.toString("utf8")) as PackageManifest;
@@ -226,7 +298,7 @@ function normalizedRecord(rec?: Record<string, string>): string {
  * - Silver: MANIFEST_PARITY_VERIFIED (package.json scripts/bin/dependencies match gitHead)
  * - Bronze: COMPILED_DIST_UNATTESTED vs TARBALL_SOURCE_DRIFT (handles TypeScript dist/ cleanly!)
  */
-export function verifyTarballVsGitParity(params: {
+export async function verifyTarballVsGitParity(params: {
   tarballManifest: PackageManifest | null;
   tarballEntries: TarEntry[];
   provenanceAttested: boolean;
@@ -237,7 +309,8 @@ export function verifyTarballVsGitParity(params: {
   repositoryUrl?: string;
   localGitDir?: string;
   subdir?: string;
-}): ParityResult {
+  signal?: AbortSignal;
+}): Promise<ParityResult> {
   const observations: Observation[] = [];
   const unknowns: string[] = [];
 
@@ -371,7 +444,7 @@ export function verifyTarballVsGitParity(params: {
     };
   }
   const prefix = params.subdir ? `${params.subdir.replace(/^\/+|\/+$/g, "")}/` : "";
-  const gitPkgBuf = runGitBuffer(["show", `${ref}:${prefix}package.json`], params.localGitDir);
+  const gitPkgBuf = await runGitBuffer(["show", `${ref}:${prefix}package.json`], params.localGitDir, 15000, params.signal);
   if (!gitPkgBuf || !params.tarballManifest) {
     unknowns.push(`GIT_MANIFEST_UNREADABLE: could not read '${ref}:${prefix}package.json' from local Git repo.`);
     return {
@@ -443,7 +516,12 @@ export function verifyTarballVsGitParity(params: {
   }
 
   // Check if non-build JS files in tarball exist in Git and match SHA-256
-  const treeList = runGit(["ls-tree", "-r", ref, ...(prefix ? [prefix.slice(0, -1)] : [])], params.localGitDir);
+  const treeList = await runGit(
+    ["ls-tree", "-r", ref, ...(prefix ? [prefix.slice(0, -1)] : [])],
+    params.localGitDir,
+    15000,
+    params.signal,
+  );
   const gitFilePaths = new Set<string>();
   let hasBuildConfig = false;
   if (treeList.ok) {
@@ -470,7 +548,7 @@ export function verifyTarballVsGitParity(params: {
   for (const entry of params.tarballEntries) {
     if (entry.path === "package.json") continue;
     if (gitFilePaths.has(entry.path)) {
-      const gitBlob = runGitBuffer(["show", `${ref}:${prefix}${entry.path}`], params.localGitDir);
+      const gitBlob = await runGitBuffer(["show", `${ref}:${prefix}${entry.path}`], params.localGitDir, 15000, params.signal);
       if (gitBlob) {
         const gitSha = createHash("sha256").update(gitBlob).digest("hex");
         if (gitSha !== entry.sha256) {
@@ -615,7 +693,7 @@ function classifyCommitObservations(obs: Observation[], unknowns: string[]): Tru
  * in SplitPlaneCache so unchanged files across commits are scanned at most once.
  * Aggregates findings across the FULL tree of each commit (catching multi-file split payloads).
  */
-export function walkGitHistoryForCleanAnchor(params: {
+export async function walkGitHistoryForCleanAnchor(params: {
   package_name: string;
   repoUrlOrLocalPath: string;
   isLocalDir: boolean;
@@ -632,7 +710,8 @@ export function walkGitHistoryForCleanAnchor(params: {
   compromisedCommits?: Set<string>;
   compromisedReason?: string;
   alternatives?: SafeAnchorDecision["alternatives"];
-}): SafeAnchorDecision {
+  signal?: AbortSignal;
+}): Promise<SafeAnchorDecision> {
   const unknowns: string[] = [];
   const inspected_commits: CommitAuditSummary[] = [];
   const evidence: EvidenceRecord[] = [];
@@ -660,6 +739,20 @@ export function walkGitHistoryForCleanAnchor(params: {
 
   try {
     if (!params.isLocalDir) {
+      // Security [MCP-03]: fail closed on remote git clone whenever offline_mode is enabled
+      if (params.policy.offline_mode) {
+        unknowns.push("OFFLINE_MODE_GIT_CLONE_BLOCKED: remote git clone is disabled while offline_mode is enabled.");
+        return {
+          schema_version: "1",
+          package_name: params.package_name,
+          compromised_latest: { reason: "Remote git clone blocked in offline mode; supply a local git_dir instead." },
+          recommended_action: params.alternatives?.length ? "SWITCH_TO_ALTERNATIVE" : "BLOCK_NO_SAFE_PATH",
+          alternatives: params.alternatives ?? [],
+          inspected_commits,
+          evidence,
+          unknowns,
+        };
+      }
       const urlCheck = validateRemoteGitUrl(params.repoUrlOrLocalPath);
       if (!urlCheck.valid) {
         unknowns.push(`GIT_REMOTE_URL_REJECTED: ${urlCheck.reason ?? "invalid URL"}`);
@@ -675,6 +768,7 @@ export function walkGitHistoryForCleanAnchor(params: {
         };
       }
       tempCloneDir = mkdtempSync(join(tmpdir(), "coldpin-git-"));
+      ACTIVE_GIT_TEMP_DIRS.add(tempCloneDir);
       const cloneArgs = [
         "clone",
         "--filter=blob:none",
@@ -684,7 +778,7 @@ export function walkGitHistoryForCleanAnchor(params: {
         params.repoUrlOrLocalPath,
         tempCloneDir,
       ];
-      const cloneRes = runGit(cloneArgs, tmpdir(), 30000);
+      const cloneRes = await runGit(cloneArgs, tmpdir(), 30000, params.signal);
       if (!cloneRes.ok) {
         unknowns.push(`GIT_CLONE_FAILED: ${cloneRes.stderr.trim()}`);
         return {
@@ -714,7 +808,7 @@ export function walkGitHistoryForCleanAnchor(params: {
     ];
     if (params.subdir) logArgs.push("--", params.subdir);
 
-    const logRes = runGit(logArgs, workDir);
+    const logRes = await runGit(logArgs, workDir, 15000, params.signal);
     if (!logRes.ok) {
       unknowns.push(`GIT_REV_LIST_FAILED: ${logRes.stderr.trim()}`);
       return {
@@ -755,11 +849,16 @@ export function walkGitHistoryForCleanAnchor(params: {
     const blobMemoryCache = new Map<string, CachedBlobFacts>();
 
     for (let idx = 0; idx < commits.length; idx++) {
+      if (params.signal?.aborted) {
+        throw new Error("Operation aborted");
+      }
       const c = commits[idx]!;
       // Use diff-tree --root --first-parent to count changed blobs safely (even on root commits)
-      const diffRes = runGit(
+      const diffRes = await runGit(
         ["diff-tree", "--root", "--first-parent", "-r", "--no-commit-id", "--name-only", c.sha],
         workDir,
+        15000,
+        params.signal,
       );
       const changedCount = diffRes.ok
         ? diffRes.stdout.split(/\r?\n/).filter((l) => l.trim().length > 0).length
@@ -767,7 +866,7 @@ export function walkGitHistoryForCleanAnchor(params: {
 
       // Full-tree listing so multi-file split payloads across blobs in commit C are evaluated together
       const treeArgs = ["ls-tree", "-r", c.sha, ...(params.subdir ? [params.subdir] : [])];
-      const treeRes = runGit(treeArgs, workDir);
+      const treeRes = await runGit(treeArgs, workDir, 15000, params.signal);
       if (!treeRes.ok) {
         unknowns.push(`GIT_LS_TREE_FAILED:${c.sha}`);
         continue;
@@ -799,7 +898,7 @@ export function walkGitHistoryForCleanAnchor(params: {
         if (blobFacts) {
           cacheHits++;
         } else {
-          const blobBuf = runGitBuffer(["cat-file", "blob", blobSha], workDir);
+          const blobBuf = await runGitBuffer(["cat-file", "blob", blobSha], workDir, 15000, params.signal);
           if (!blobBuf) {
             commitUnknowns.push(`GIT_BLOB_READ_FAILED:${blobSha}:${filePath}`);
             continue;
@@ -1258,6 +1357,7 @@ export function walkGitHistoryForCleanAnchor(params: {
     };
   } finally {
     if (tempCloneDir) {
+      ACTIVE_GIT_TEMP_DIRS.delete(tempCloneDir);
       try {
         rmSync(tempCloneDir, { recursive: true, force: true });
       } catch {

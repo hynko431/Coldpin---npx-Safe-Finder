@@ -1,18 +1,25 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, statSync, unlinkSync } from "node:fs";
+import { appendFile, mkdir, open, stat, unlink } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname } from "node:path";
+import { openReadCappedFile, readCappedRegularFileSync } from "../core/path-confinement.ts";
 import type { AuditEvent } from "../types.ts";
 
 const GENESIS_HASH = "0".repeat(64);
 const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 25;
 const LOCK_MAX_ATTEMPTS = 80;
+export const MAX_AUDIT_LOG_BYTES = 20 * 1024 * 1024;
 
 const SLEEP_ARRAY = new Int32Array(new SharedArrayBuffer(4));
 
 function sleepSync(ms: number): void {
   Atomics.wait(SLEEP_ARRAY, 0, 0, ms);
+}
+
+function sleepAsync(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function withAuditFileLock<T>(auditLogPath: string, fn: () => T): T {
@@ -34,7 +41,6 @@ function withAuditFileLock<T>(auditLogPath: string, fn: () => T): T {
           continue;
         }
       } catch {
-        // Lock disappeared between EEXIST and statSync; retry immediately
         continue;
       }
       sleepSync(LOCK_WAIT_MS);
@@ -61,24 +67,80 @@ function withAuditFileLock<T>(auditLogPath: string, fn: () => T): T {
   }
 }
 
+async function withAuditFileLockAsync<T>(auditLogPath: string, fn: () => Promise<T>): Promise<T> {
+  const lockPath = `${auditLogPath}.lock`;
+  await mkdir(dirname(auditLogPath), { recursive: true });
+
+  let fh: Awaited<ReturnType<typeof open>> | null = null;
+  for (let attempt = 0; attempt < LOCK_MAX_ATTEMPTS; attempt++) {
+    try {
+      fh = await open(lockPath, "wx");
+      break;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code !== "EEXIST") throw err;
+      try {
+        const st = await stat(lockPath);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          await unlink(lockPath);
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      const jitter = Math.floor(Math.random() * 15);
+      await sleepAsync(LOCK_WAIT_MS + jitter);
+    }
+  }
+
+  if (fh === null) {
+    throw new Error(`Timed out acquiring audit log lock at ${lockPath}`);
+  }
+
+  try {
+    return await fn();
+  } finally {
+    try {
+      await fh.close();
+    } catch {
+      // Ignore close error on cleanup
+    }
+    try {
+      await unlink(lockPath);
+    } catch {
+      // Ignore unlink error on cleanup
+    }
+  }
+}
+
 /**
- * Structured operational JSON telemetry on stderr — strictly separate from the
+ * Structured operational JSON telemetry formatter — strictly separate from the
  * hash-chained audit trail (`audit.jsonl`). Never logs secrets, tokens, or PII.
+ * Pure-core invariant: never writes directly to `process.stdout` or `process.stderr`;
+ * callers inject a `writer` (CLI/MCP pass stderr).
  */
-export function logOperationalEvent(verbose: boolean, event: Record<string, unknown>): void {
-  if (!verbose) return;
-  const line = JSON.stringify({
+export function logOperationalEvent(
+  verbose: boolean,
+  event: Record<string, unknown>,
+  writer?: (line: string) => void,
+): string | null {
+  if (!verbose) return null;
+  const line = `${JSON.stringify({
     ts_utc: new Date().toISOString(),
     stream: "operational",
     ...event,
-  });
-  process.stderr.write(`${line}\n`);
+  })}\n`;
+  if (writer) writer(line);
+  return line;
 }
 
 const ALLOWED_AUDIT_KEYS = new Set([
   "seq",
   "ts_utc",
   "request_id",
+  "invoker_surface",
+  "mcp_client_name",
+  "tool_name",
   "actor_id_hash",
   "action",
   "target",
@@ -98,6 +160,9 @@ function canonicalAuditPayload(ev: Omit<AuditEvent, "entry_hash">): string {
     seq: ev.seq,
     ts_utc: ev.ts_utc,
     ...(ev.request_id !== undefined ? { request_id: ev.request_id } : {}),
+    ...(ev.invoker_surface !== undefined ? { invoker_surface: ev.invoker_surface } : {}),
+    ...(ev.mcp_client_name !== undefined ? { mcp_client_name: ev.mcp_client_name } : {}),
+    ...(ev.tool_name !== undefined ? { tool_name: ev.tool_name } : {}),
     actor_id_hash: ev.actor_id_hash,
     action: ev.action,
     target: ev.target,
@@ -123,66 +188,88 @@ export function computePseudonymousActorId(salt = "coldpin-local-v1"): string {
   return `actor_${createHash("sha256").update(`${salt}:${username}`).digest("hex").slice(0, 16)}`;
 }
 
+function buildChainedAuditEntry(
+  rawExisting: string | null,
+  auditLogPath: string,
+  params: Omit<AuditEvent, "seq" | "ts_utc" | "actor_id_hash" | "prev_hash" | "entry_hash">,
+): AuditEvent {
+  let prevHash = GENESIS_HASH;
+  let nextSeq = 1;
+
+  if (rawExisting !== null) {
+    const lines = rawExisting
+      .split(/\r?\n/)
+      .filter((l) => l.trim().length > 0);
+    if (lines.length > 0) {
+      let last: AuditEvent;
+      try {
+        last = JSON.parse(lines[lines.length - 1]!) as AuditEvent;
+      } catch {
+        throw new Error(`Corrupted final JSONL line in audit log ${auditLogPath}; refusing to chain.`);
+      }
+      if (typeof last.seq !== "number" || typeof last.entry_hash !== "string" || !/^[0-9a-f]{64}$/.test(last.entry_hash)) {
+        throw new Error(`Invalid final audit entry fields in ${auditLogPath}; refusing to chain.`);
+      }
+      prevHash = last.entry_hash;
+      nextSeq = last.seq + 1;
+    }
+  }
+
+  const base: Omit<AuditEvent, "entry_hash"> = {
+    seq: nextSeq,
+    ts_utc: new Date().toISOString(),
+    actor_id_hash: computePseudonymousActorId(),
+    ...params,
+    prev_hash: prevHash,
+  };
+  const entry_hash = createHash("sha256")
+    .update(`${prevHash}|${canonicalAuditPayload(base)}`)
+    .digest("hex");
+
+  return { ...base, entry_hash };
+}
+
 /**
  * Local append-only hash-chained audit trail (`audit.jsonl`) with atomic lockfile
- * serialization so concurrent CLI invocations cannot fork or corrupt the chain.
- * Note: local files provide local tamper-evidence only; enterprise non-repudiation
- * requires forwarding events off-host to WORM / object-lock storage (Phase 3).
+ * serialization so concurrent invocations cannot fork or corrupt the chain.
  */
 export function appendAuditEvent(
   auditLogPath: string,
   params: Omit<AuditEvent, "seq" | "ts_utc" | "actor_id_hash" | "prev_hash" | "entry_hash">,
 ): AuditEvent {
   return withAuditFileLock(auditLogPath, () => {
-    let prevHash = GENESIS_HASH;
-    let nextSeq = 1;
-
-    if (existsSync(auditLogPath)) {
-      const lines = readFileSync(auditLogPath, "utf8")
-        .split(/\r?\n/)
-        .filter((l) => l.trim().length > 0);
-      if (lines.length > 0) {
-        let last: AuditEvent;
-        try {
-          last = JSON.parse(lines[lines.length - 1]!) as AuditEvent;
-        } catch {
-          throw new Error(`Corrupted final JSONL line in audit log ${auditLogPath}; refusing to chain.`);
-        }
-        if (typeof last.seq !== "number" || typeof last.entry_hash !== "string" || !/^[0-9a-f]{64}$/.test(last.entry_hash)) {
-          throw new Error(`Invalid final audit entry fields in ${auditLogPath}; refusing to chain.`);
-        }
-        prevHash = last.entry_hash;
-        nextSeq = last.seq + 1;
-      }
-    }
-
-    const base: Omit<AuditEvent, "entry_hash"> = {
-      seq: nextSeq,
-      ts_utc: new Date().toISOString(),
-      actor_id_hash: computePseudonymousActorId(),
-      ...params,
-      prev_hash: prevHash,
-    };
-    const entry_hash = createHash("sha256")
-      .update(`${prevHash}|${canonicalAuditPayload(base)}`)
-      .digest("hex");
-
-    const full: AuditEvent = { ...base, entry_hash };
+    const rawExisting = existsSync(auditLogPath)
+      ? readCappedRegularFileSync(auditLogPath, MAX_AUDIT_LOG_BYTES).toString("utf8")
+      : null;
+    const full = buildChainedAuditEntry(rawExisting, auditLogPath, params);
     appendFileSync(auditLogPath, `${JSON.stringify(full)}\n`, "utf8");
     return full;
   });
 }
 
-export function verifyAuditLog(auditLogPath: string): {
+export async function appendAuditEventAsync(
+  auditLogPath: string,
+  params: Omit<AuditEvent, "seq" | "ts_utc" | "actor_id_hash" | "prev_hash" | "entry_hash">,
+): Promise<AuditEvent> {
+  return withAuditFileLockAsync(auditLogPath, async () => {
+    let rawExisting: string | null = null;
+    if (existsSync(auditLogPath)) {
+      const buf = await openReadCappedFile(auditLogPath, MAX_AUDIT_LOG_BYTES);
+      rawExisting = buf.toString("utf8");
+    }
+    const full = buildChainedAuditEntry(rawExisting, auditLogPath, params);
+    await appendFile(auditLogPath, `${JSON.stringify(full)}\n`, "utf8");
+    return full;
+  });
+}
+
+export function verifyAuditLogContent(rawContent: string): {
   valid: boolean;
   total_events: number;
   broken_at_seq?: number;
   reason?: string;
 } {
-  if (!existsSync(auditLogPath)) {
-    return { valid: false, total_events: 0, reason: `Audit log not found at ${auditLogPath}` };
-  }
-  const lines = readFileSync(auditLogPath, "utf8")
+  const lines = rawContent
     .split(/\r?\n/)
     .filter((l) => l.trim().length > 0);
 
@@ -194,13 +281,16 @@ export function verifyAuditLog(auditLogPath: string): {
     } catch {
       return { valid: false, total_events: lines.length, broken_at_seq: i + 1, reason: `Malformed JSON at line ${i + 1}` };
     }
+    if (ev === null || typeof ev !== "object" || Array.isArray(ev)) {
+      return { valid: false, total_events: lines.length, broken_at_seq: i + 1, reason: `Non-object JSON entry at line ${i + 1}` };
+    }
     const expectedSeq = i + 1;
     if (ev.seq !== expectedSeq) {
       return {
         valid: false,
         total_events: lines.length,
         broken_at_seq: expectedSeq,
-        reason: `Sequence gap/mismatch: expected ${expectedSeq}, found ${ev.seq}`,
+        reason: `Sequence gap/mismatch: expected ${expectedSeq}, found ${String(ev.seq)}`,
       };
     }
     if (ev.prev_hash !== expectedPrev) {
@@ -217,7 +307,7 @@ export function verifyAuditLog(auditLogPath: string): {
         valid: false,
         total_events: lines.length,
         broken_at_seq: ev.seq,
-        reason: `Unexpected unhashed field(s) injected at seq ${ev.seq}: ${unexpectedKeys.join(", ")}`,
+        reason: `Unexpected unhashed field(s) injected at seq ${ev.seq} (${unexpectedKeys.length} disallowed key(s); redacted).`,
       };
     }
     const { entry_hash, ...rest } = ev;
@@ -236,4 +326,29 @@ export function verifyAuditLog(auditLogPath: string): {
   }
 
   return { valid: true, total_events: lines.length };
+}
+
+export function verifyAuditLog(
+  auditLogPath: string,
+  maxBytes = MAX_AUDIT_LOG_BYTES,
+): {
+  valid: boolean;
+  total_events: number;
+  broken_at_seq?: number;
+  reason?: string;
+} {
+  if (!existsSync(auditLogPath)) {
+    return { valid: false, total_events: 0, reason: `Audit log not found at ${auditLogPath}` };
+  }
+  let rawContent: string;
+  try {
+    rawContent = readCappedRegularFileSync(auditLogPath, maxBytes).toString("utf8");
+  } catch (err) {
+    return {
+      valid: false,
+      total_events: 0,
+      reason: `Audit log unreadable or exceeds size cap: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  return verifyAuditLogContent(rawContent);
 }

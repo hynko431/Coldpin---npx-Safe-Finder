@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.hynko431/coldpin",
+  "title": "Coldpin",
+  "description": "Zero-execution npx/npm security auditor: static taint, Git parity, clean anchors, confusion.",
+  "version": "1.3.0",
+  "repository": {
+    "url": "https://github.com/hynko431/Coldpin-npx-Safe-Finder",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "coldpin",
+      "version": "1.3.0",
+      "runtimeHint": "npx",
+      "runtimeArguments": [
+        { "type": "positional", "value": "--ignore-scripts" }
+      ],
+      "packageArguments": [
+        { "type": "positional", "value": "mcp" }
+      ],
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        { "name": "COLDPIN_POLICY_PATH", "description": "Optional immutable .coldpin.policy.json path", "isRequired": false, "isSecret": false },
+        { "name": "COLDPIN_ALLOWED_ROOTS", "description": "Optional OS-delimited local workspace roots", "isRequired": false, "isSecret": false },
+        { "name": "COLDPIN_AUDIT_LOG", "description": "Optional hash-chained audit.jsonl path", "isRequired": false, "isSecret": false },
+        { "name": "COLDPIN_OFFLINE", "description": "Set to 1 to force offline fail-closed mode", "isRequired": false, "isSecret": false }
+      ]
+    }
+  ]
+}

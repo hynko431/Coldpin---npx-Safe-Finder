@@ -24,10 +24,10 @@ sources: Enterprise Commons MAINTENANCE.md; Google EGM runtime_packaging.md; NVI
 
 ## Rules
 
-- No volatile regulatory date or external threshold enters `skill-src/` without a corresponding row in `docs/fact-ledger.md`.
-- Every file under `skill-src/coldpin/references/` carries `last_reviewed`, `review_by` (3 months for regulation-heavy files, 6 months max), and `status`.
-- Keep `skill-src/coldpin/SKILL.md` strictly `<= 220` lines and `<= 24 KB`.
+- No volatile regulatory date or external threshold enters `skills/` without a corresponding row in `docs/fact-ledger.md`.
+- Every file under `skills/coldpin/references/` carries `last_reviewed`, `review_by` (3 months for regulation-heavy files, 6 months max), and `status`.
+- Keep `skills/coldpin/SKILL.md` strictly `<= 220` lines and `<= 24,000` bytes.
 - Never hand-edit `.agents/skills/coldpin/`; always regenerate via `scripts/pack_plugin.py --sync-workspace`.
-- Regenerate `skill.oms.sig` and `BENCHMARK.md` whenever any file in `skill-src/coldpin/`, `rules/`, or `src/` changes, and bump `CHANGELOG.md` (semver).
+- Regenerate `lib/**/*.mjs`, `BENCHMARK.md`, `docs/verification/skill-inspector-self-audit.md`, and `skill.oms.sig` (in order: `build` → `bench` → `audit:self` → `sign:skill` → `pack:plugin`) whenever any file in `skills/coldpin/`, `rules/`, or `src/` changes, and bump `CHANGELOG.md` (semver).
 
 Next quarterly review: `2027-02-20`.

@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SKILL_DIR = ROOT / "skill-src" / "coldpin"
+SKILL_DIR = ROOT / "skills" / "coldpin"
 SELECTION_PATH = ROOT / "tests" / "selection.jsonl"
 
 STOP = set(

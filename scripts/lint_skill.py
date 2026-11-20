@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Zero-dependency Enterprise Skill Linter & Hygiene Validator for Coldpin.
+"""Zero-dependency Enterprise Skill & MCP Manifest Linter for Coldpin.
 
 Checks:
-1. SKILL.md budget (<= 220 lines, <= 24 KB) and valid YAML frontmatter (name, description).
+1. SKILL.md budget (<= 220 lines, <= 24,000 bytes matching agy.exe strict threshold) and valid YAML frontmatter.
 2. Clean UTF-8 and zero hidden/bidirectional/tag Unicode (Trojan Source defense).
-3. Shift-left secret & credential-URI scan across all text files in skill-src/ and src/.
-4. Relative Markdown link resolution inside skill-src/coldpin/.
+3. Shift-left secret & credential-URI scan across all text files in skills/coldpin/.
+4. Relative Markdown link resolution inside skills/coldpin/.
 5. Reference files carry `last_reviewed:` and `review_by:` metadata.
 6. Alignment between CLI verbs in runtime-contract.yaml and SKILL.md.
+7. Cross-harness 10-manifest version & MCP schema/config parity (`plugin.json`, `package.json`,
+   `server.json`, `mcp_config.json`, `.claude-plugin/{plugin,marketplace}.json`, `.codex-plugin/plugin.json`,
+   `src/types.ts`, `rules/triage-rules.json`, `rules/mcp-schema-pin.json`, `SKILL.md`, `skill-card.md`).
 """
 
 import json
@@ -23,9 +26,9 @@ if sys.platform == "win32":
         pass
 
 ROOT = Path(__file__).resolve().parent.parent
-SKILL_DIR = ROOT / "skill-src" / "coldpin"
+SKILL_DIR = ROOT / "skills" / "coldpin"
 MAX_LINES = 220
-MAX_BYTES = 24 * 1024
+MAX_BYTES = 24_000
 
 HIDDEN_UNICODE_RE = re.compile(
     r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u00ad\U000e0000-\U000e007f]"
@@ -106,13 +109,22 @@ def main() -> int:
             if verb not in text:
                 errors.append(f"Contract cli_verb '{verb}' not documented in SKILL.md")
 
-    # Cross-harness manifest & version parity check (Google EGM pattern)
+    # Disallow conflicting root .mcp.json or mcp.json (breaks agy plugin validate --strict)
+    for forbidden_root in (ROOT / ".mcp.json", ROOT / "mcp.json"):
+        if forbidden_root.exists():
+            errors.append(f"Forbidden root MCP manifest '{forbidden_root.name}' conflicts with agy plugin validate --strict")
+
+    # Cross-harness manifest & version parity check
     root_manifest_path = ROOT / "plugin.json"
     if not root_manifest_path.exists():
         errors.append("Missing root plugin.json")
     else:
         root_m = json.loads(root_manifest_path.read_text(encoding="utf-8"))
         root_ver = root_m.get("version")
+        if "mcpServers" in root_m:
+            errors.append("Root plugin.json must NOT inline 'mcpServers' (use root mcp_config.json for agy --strict)")
+        if "$schema" in root_m:
+            errors.append("Root plugin.json must omit '$schema' for cross-harness compatibility")
         logo = root_m.get("logo")
         if isinstance(logo, str) and not (ROOT / logo).exists():
             errors.append(f"Root plugin.json logo missing on disk: {logo}")
@@ -126,6 +138,13 @@ def main() -> int:
                     errors.append(
                         f"Manifest drift in {compat.relative_to(ROOT).as_posix()}: '{field}' differs from root plugin.json"
                     )
+            if compat.parent.name == ".claude-plugin":
+                c_mcp = cm.get("mcpServers", {}).get("coldpin", {})
+                for arg in c_mcp.get("args", []):
+                    if isinstance(arg, str) and "${CLAUDE_PLUGIN_ROOT}/" in arg:
+                        rel_target = arg.replace("${CLAUDE_PLUGIN_ROOT}/", "")
+                        if not (ROOT / rel_target).exists():
+                            errors.append(f".claude-plugin/plugin.json MCP target missing on disk: {rel_target}")
         claude_mkt = ROOT / ".claude-plugin" / "marketplace.json"
         if claude_mkt.exists():
             mkt_data = json.loads(claude_mkt.read_text(encoding="utf-8"))
@@ -145,27 +164,79 @@ def main() -> int:
                 m_rel = p_entry.get("manifest")
                 if isinstance(m_rel, str) and not (ROOT / m_rel).exists():
                     errors.append(f"Missing manifest referenced in .agents/plugins/marketplace.json: {m_rel}")
+
         pkg_json = ROOT / "package.json"
+        pkg_data: dict = {}
         if pkg_json.exists():
-            pkg_ver = json.loads(pkg_json.read_text(encoding="utf-8")).get("version")
+            pkg_data = json.loads(pkg_json.read_text(encoding="utf-8"))
+            pkg_ver = pkg_data.get("version")
             if pkg_ver != root_ver:
                 errors.append(f"Version drift in package.json: {pkg_ver} != {root_ver}")
+            for bin_name, bin_rel in (pkg_data.get("bin") or {}).items():
+                if isinstance(bin_rel, str):
+                    if bin_rel.endswith(".ts"):
+                        errors.append(f"package.json bin '{bin_name}' points to .ts file ({bin_rel}); must use compiled lib/*.mjs")
+                    if not (ROOT / bin_rel).exists():
+                        errors.append(f"package.json bin '{bin_name}' target missing on disk: {bin_rel}")
+
+        # Validate root mcp_config.json
+        mcp_cfg_path = ROOT / "mcp_config.json"
+        if not mcp_cfg_path.exists():
+            errors.append("Missing root mcp_config.json")
+        else:
+            mcp_cfg = json.loads(mcp_cfg_path.read_text(encoding="utf-8"))
+            srv_cfg = mcp_cfg.get("mcpServers", {}).get("coldpin", {})
+            if not srv_cfg:
+                errors.append("mcp_config.json missing mcpServers.coldpin entry")
+            for arg in srv_cfg.get("args", []):
+                if isinstance(arg, str) and "${PLUGIN_ROOT}/" in arg:
+                    rel_target = arg.replace("${PLUGIN_ROOT}/", "")
+                    if not (ROOT / rel_target).exists():
+                        errors.append(f"mcp_config.json target missing on disk: {rel_target}")
+
+        # Validate root server.json (Official MCP Registry 2025-12-11 schema)
+        srv_json_path = ROOT / "server.json"
+        if not srv_json_path.exists():
+            errors.append("Missing root server.json")
+        else:
+            srv_doc = json.loads(srv_json_path.read_text(encoding="utf-8"))
+            if srv_doc.get("version") != root_ver:
+                errors.append(f"Version drift in server.json: {srv_doc.get('version')} != {root_ver}")
+            desc = srv_doc.get("description", "")
+            if not isinstance(desc, str) or len(desc) == 0 or len(desc) > 100:
+                errors.append(f"server.json description must be 1..100 chars (got {len(desc) if isinstance(desc, str) else 'non-string'})")
+            if pkg_data and srv_doc.get("name") != pkg_data.get("mcpName"):
+                errors.append(f"server.json name '{srv_doc.get('name')}' != package.json mcpName '{pkg_data.get('mcpName')}'")
+            pkgs = srv_doc.get("packages", [])
+            if not pkgs or pkgs[0].get("version") != root_ver:
+                errors.append("server.json packages[0].version does not match root version")
+            if pkg_data and pkgs and pkgs[0].get("identifier") != pkg_data.get("name"):
+                errors.append(f"server.json packages[0].identifier '{pkgs[0].get('identifier')}' != package.json name '{pkg_data.get('name')}'")
+
         if fm_match:
             sm_ver = extract_skill_md_version(fm_match.group(1))
             if sm_ver != root_ver:
                 errors.append(f"Version drift in SKILL.md frontmatter: {sm_ver} != {root_ver}")
         skill_card = SKILL_DIR / "skill-card.md"
         if not skill_card.exists():
-            errors.append("Missing skill-src/coldpin/skill-card.md")
+            errors.append("Missing skills/coldpin/skill-card.md")
         else:
             sc_ver = extract_skill_card_version(skill_card.read_text(encoding="utf-8"))
             if sc_ver != root_ver:
-                errors.append(f"Version drift in skill-src/coldpin/skill-card.md: {sc_ver} != {root_ver}")
+                errors.append(f"Version drift in skills/coldpin/skill-card.md: {sc_ver} != {root_ver}")
         types_ts = ROOT / "src" / "types.ts"
         if types_ts.exists():
             eng_m = re.search(r'ENGINE_VERSION\s*=\s*"([^"]+)"', types_ts.read_text(encoding="utf-8"))
             if not eng_m or eng_m.group(1) != root_ver:
                 errors.append(f"Version drift in src/types.ts ENGINE_VERSION: {eng_m.group(1) if eng_m else None} != {root_ver}")
+
+        mcp_pin = ROOT / "rules" / "mcp-schema-pin.json"
+        if not mcp_pin.exists():
+            errors.append("Missing rules/mcp-schema-pin.json")
+        else:
+            pin_doc = json.loads(mcp_pin.read_text(encoding="utf-8"))
+            if pin_doc.get("engine_version") != root_ver:
+                errors.append(f"Version drift in rules/mcp-schema-pin.json: {pin_doc.get('engine_version')} != {root_ver}")
 
     # Validate rules/triage-rules.json catalog
     rules_manifest = ROOT / "rules" / "triage-rules.json"
@@ -183,7 +254,7 @@ def main() -> int:
         except json.JSONDecodeError as exc:
             errors.append(f"Invalid JSON in rules/triage-rules.json: {exc}")
 
-    # Hidden/bidi Unicode & shift-left secret scan across skill-src/
+    # Hidden/bidi Unicode & shift-left secret scan across skills/coldpin/
     for p in sorted(SKILL_DIR.rglob("*")):
         if not p.is_file() or p.suffix.lower() in BINARY_EXTS:
             continue
@@ -206,7 +277,7 @@ def main() -> int:
             print(f"  - {e}", file=sys.stderr)
         return 1
 
-    print("LINT OK: skill manifest, links, contract alignment, Unicode hygiene, and secret scan passed.")
+    print("LINT OK: skill manifest, MCP configs, 10-manifest parity, links, contract alignment, Unicode hygiene, and secret scan passed.")
     return 0
 
 

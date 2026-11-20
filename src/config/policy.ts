@@ -1,9 +1,15 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
+import { readCappedRegularFileSync } from "../core/path-confinement.ts";
 import type { HostCapabilities, PolicyConfig } from "../types.ts";
+
+const execFileAsync = promisify(execFile);
+const MAX_POLICY_BYTES = 1024 * 1024;
+const MAX_NPMRC_BYTES = 512 * 1024;
 
 export const DEFAULT_POLICY: PolicyConfig = {
   private_scopes: [],
@@ -39,7 +45,7 @@ export interface NpmrcConfig {
 }
 
 export interface RegistryRouteResult {
-  route: "private" | "public" | "blocked_typo" | "blocked_unconfigured";
+  route: "private" | "public" | "blocked_typo" | "blocked_unconfigured" | "blocked_secret";
   registry_url: string;
   auth_token?: string;
   matched_scope_or_prefix?: string;
@@ -47,6 +53,27 @@ export interface RegistryRouteResult {
 }
 
 const PUBLIC_NPM_HOSTS = new Set(["registry.npmjs.org", "registry.yarnpkg.com"]);
+
+const SECRET_LIKE_PATTERNS: readonly RegExp[] = [
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,}\b/,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+  /\bnpm_[A-Za-z0-9]{20,}\b/,
+  /\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/,
+  /\bsk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{20,}\b/,
+  /\bAIza[0-9A-Za-z_-]{25,}\b/,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\b/,
+  /-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/i,
+  /\b(?:api[_-]?key|secret|password|passwd|bearer|auth[_-]?token)\s*[:=]\s*[^\s]{6,}/i,
+];
+
+export function hasSecretLikeDiscoveryToken(raw: string): boolean {
+  if (!raw) return false;
+  for (const re of SECRET_LIKE_PATTERNS) {
+    if (re.test(raw)) return true;
+  }
+  return false;
+}
 
 export function isPublicNpmRegistryUrl(rawUrl: string): boolean {
   try {
@@ -115,6 +142,95 @@ function asBoolean(val: unknown, fallback: boolean): boolean {
   return typeof val === "boolean" ? val : fallback;
 }
 
+function parseRawPolicyObject(raw: Record<string, unknown>, base: PolicyConfig = DEFAULT_POLICY): PolicyConfig {
+  const normalizedPrivateRegistries: Record<string, string> = {};
+  for (const [k, v] of Object.entries(asStringRecord(raw["private_registries"], base.private_registries))) {
+    const scopeKey = k.startsWith("@") ? k.toLowerCase() : `@${k.toLowerCase()}`;
+    normalizedPrivateRegistries[scopeKey] = v.replace(/\/+$/, "");
+  }
+
+  return {
+    private_scopes: asStringArray(raw["private_scopes"], base.private_scopes).map((s) =>
+      s.startsWith("@") ? s.toLowerCase() : `@${s.toLowerCase()}`,
+    ),
+    private_prefixes: asStringArray(raw["private_prefixes"], base.private_prefixes).map((s) => s.toLowerCase()),
+    private_registries: normalizedPrivateRegistries,
+    default_registry: typeof raw["default_registry"] === "string" ? raw["default_registry"] : base.default_registry,
+    osv_api_url:
+      typeof raw["osv_api_url"] === "string" && raw["osv_api_url"].trim().length > 0
+        ? raw["osv_api_url"].trim().replace(/\/+$/, "")
+        : base.osv_api_url,
+    allow_public_fallback: asBoolean(raw["allow_public_fallback"], base.allow_public_fallback),
+    allowed_orgs: asStringArray(raw["allowed_orgs"], base.allowed_orgs).map((s) => s.toLowerCase()),
+    denied_orgs: asStringArray(raw["denied_orgs"], base.denied_orgs).map((s) => s.toLowerCase()),
+    blocked_licenses: asStringArray(raw["blocked_licenses"], base.blocked_licenses),
+    cooldown_hours: asPositiveNumber(raw["cooldown_hours"], base.cooldown_hours),
+    max_compressed_bytes: asPositiveNumber(raw["max_compressed_bytes"], base.max_compressed_bytes),
+    max_uncompressed_bytes: asPositiveNumber(raw["max_uncompressed_bytes"], base.max_uncompressed_bytes),
+    max_files: asPositiveNumber(raw["max_files"], base.max_files),
+    max_single_file_bytes: asPositiveNumber(raw["max_single_file_bytes"], base.max_single_file_bytes),
+    block_on_kev: asBoolean(raw["block_on_kev"], base.block_on_kev),
+    block_on_critical_cve: asBoolean(raw["block_on_critical_cve"], base.block_on_critical_cve),
+    block_on_high_cve: asBoolean(raw["block_on_high_cve"], base.block_on_high_cve),
+    require_provenance: asBoolean(raw["require_provenance"], base.require_provenance),
+    require_source_link: asBoolean(raw["require_source_link"], base.require_source_link),
+    bisect_max_commits: asPositiveNumber(raw["bisect_max_commits"], base.bisect_max_commits),
+    bisect_max_days: asPositiveNumber(raw["bisect_max_days"], base.bisect_max_days),
+    intel_ttl_seconds: asPositiveNumber(raw["intel_ttl_seconds"], base.intel_ttl_seconds),
+    offline_mode: asBoolean(raw["offline_mode"], base.offline_mode),
+  };
+}
+
+function readPolicyJsonFile(filePath: string): Record<string, unknown> {
+  const content = readCappedRegularFileSync(filePath, MAX_POLICY_BYTES).toString("utf8");
+  const parsed: unknown = JSON.parse(content);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Invalid policy JSON object in ${filePath}`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function mergePolicyAdditiveTighteningOnly(base: PolicyConfig, ws: PolicyConfig): PolicyConfig {
+  const unionLower = (a: string[], b: string[]): string[] =>
+    Array.from(new Set([...a.map((x) => x.toLowerCase()), ...b.map((x) => x.toLowerCase())]));
+  const unionExact = (a: string[], b: string[]): string[] => Array.from(new Set([...a, ...b]));
+  return {
+    // Workspace policy may ADD private scopes/prefixes, denied orgs, and blocked licenses
+    private_scopes: unionLower(base.private_scopes, ws.private_scopes),
+    private_prefixes: unionLower(base.private_prefixes, ws.private_prefixes),
+    // Never allow untrusted workspace policy to redirect registries, OSV endpoints, or public fallback
+    private_registries: { ...base.private_registries },
+    default_registry: base.default_registry,
+    osv_api_url: base.osv_api_url,
+    allow_public_fallback: base.allow_public_fallback && ws.allow_public_fallback,
+    // Allowed orgs may only narrow (never widen)
+    allowed_orgs:
+      base.allowed_orgs.length > 0 && ws.allowed_orgs.length > 0
+        ? base.allowed_orgs.filter((o) => ws.allowed_orgs.includes(o))
+        : base.allowed_orgs.length > 0
+          ? [...base.allowed_orgs]
+          : [...ws.allowed_orgs],
+    denied_orgs: unionLower(base.denied_orgs, ws.denied_orgs),
+    blocked_licenses: unionExact(base.blocked_licenses, ws.blocked_licenses),
+    // Thresholds & resource caps may only tighten
+    cooldown_hours: Math.max(base.cooldown_hours, ws.cooldown_hours),
+    max_compressed_bytes: Math.min(base.max_compressed_bytes, ws.max_compressed_bytes),
+    max_uncompressed_bytes: Math.min(base.max_uncompressed_bytes, ws.max_uncompressed_bytes),
+    max_files: Math.min(base.max_files, ws.max_files),
+    max_single_file_bytes: Math.min(base.max_single_file_bytes, ws.max_single_file_bytes),
+    // Security gates may only tighten (false -> true)
+    block_on_kev: base.block_on_kev || ws.block_on_kev,
+    block_on_critical_cve: base.block_on_critical_cve || ws.block_on_critical_cve,
+    block_on_high_cve: base.block_on_high_cve || ws.block_on_high_cve,
+    require_provenance: base.require_provenance || ws.require_provenance,
+    require_source_link: base.require_source_link || ws.require_source_link,
+    bisect_max_commits: Math.min(base.bisect_max_commits, ws.bisect_max_commits),
+    bisect_max_days: Math.min(base.bisect_max_days, ws.bisect_max_days),
+    intel_ttl_seconds: Math.min(base.intel_ttl_seconds, ws.intel_ttl_seconds),
+    offline_mode: base.offline_mode || ws.offline_mode,
+  };
+}
+
 export function loadPolicy(cwd: string, explicitPath?: string): {
   policy: PolicyConfig;
   policy_path: string | null;
@@ -140,82 +256,132 @@ export function loadPolicy(cwd: string, explicitPath?: string): {
   let raw: Record<string, unknown> = {};
   for (const p of candidates) {
     if (existsSync(p)) {
-      const content = readFileSync(p, "utf8");
-      const parsed: unknown = JSON.parse(content);
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error(`Invalid policy JSON object in ${p}`);
-      }
-      raw = parsed as Record<string, unknown>;
+      raw = readPolicyJsonFile(p);
       loadedPath = p;
       break;
     }
   }
 
-  const normalizedPrivateRegistries: Record<string, string> = {};
-  for (const [k, v] of Object.entries(asStringRecord(raw["private_registries"], DEFAULT_POLICY.private_registries))) {
-    const scopeKey = k.startsWith("@") ? k.toLowerCase() : `@${k.toLowerCase()}`;
-    normalizedPrivateRegistries[scopeKey] = v.replace(/\/+$/, "");
-  }
-
-  const policy: PolicyConfig = {
-    private_scopes: asStringArray(raw["private_scopes"], DEFAULT_POLICY.private_scopes).map((s) =>
-      s.startsWith("@") ? s.toLowerCase() : `@${s.toLowerCase()}`,
-    ),
-    private_prefixes: asStringArray(raw["private_prefixes"], DEFAULT_POLICY.private_prefixes).map((s) =>
-      s.toLowerCase(),
-    ),
-    private_registries: normalizedPrivateRegistries,
-    default_registry:
-      typeof raw["default_registry"] === "string" ? raw["default_registry"] : DEFAULT_POLICY.default_registry,
-    osv_api_url:
-      typeof raw["osv_api_url"] === "string" && raw["osv_api_url"].trim().length > 0
-        ? raw["osv_api_url"].trim().replace(/\/+$/, "")
-        : DEFAULT_POLICY.osv_api_url,
-    allow_public_fallback: asBoolean(raw["allow_public_fallback"], DEFAULT_POLICY.allow_public_fallback),
-    allowed_orgs: asStringArray(raw["allowed_orgs"], DEFAULT_POLICY.allowed_orgs).map((s) => s.toLowerCase()),
-    denied_orgs: asStringArray(raw["denied_orgs"], DEFAULT_POLICY.denied_orgs).map((s) => s.toLowerCase()),
-    blocked_licenses: asStringArray(raw["blocked_licenses"], DEFAULT_POLICY.blocked_licenses),
-    cooldown_hours: asPositiveNumber(raw["cooldown_hours"], DEFAULT_POLICY.cooldown_hours),
-    max_compressed_bytes: asPositiveNumber(raw["max_compressed_bytes"], DEFAULT_POLICY.max_compressed_bytes),
-    max_uncompressed_bytes: asPositiveNumber(raw["max_uncompressed_bytes"], DEFAULT_POLICY.max_uncompressed_bytes),
-    max_files: asPositiveNumber(raw["max_files"], DEFAULT_POLICY.max_files),
-    max_single_file_bytes: asPositiveNumber(raw["max_single_file_bytes"], DEFAULT_POLICY.max_single_file_bytes),
-    block_on_kev: asBoolean(raw["block_on_kev"], DEFAULT_POLICY.block_on_kev),
-    block_on_critical_cve: asBoolean(raw["block_on_critical_cve"], DEFAULT_POLICY.block_on_critical_cve),
-    block_on_high_cve: asBoolean(raw["block_on_high_cve"], DEFAULT_POLICY.block_on_high_cve),
-    require_provenance: asBoolean(raw["require_provenance"], DEFAULT_POLICY.require_provenance),
-    require_source_link: asBoolean(raw["require_source_link"], DEFAULT_POLICY.require_source_link),
-    bisect_max_commits: asPositiveNumber(raw["bisect_max_commits"], DEFAULT_POLICY.bisect_max_commits),
-    bisect_max_days: asPositiveNumber(raw["bisect_max_days"], DEFAULT_POLICY.bisect_max_days),
-    intel_ttl_seconds: asPositiveNumber(raw["intel_ttl_seconds"], DEFAULT_POLICY.intel_ttl_seconds),
-    offline_mode: asBoolean(raw["offline_mode"], DEFAULT_POLICY.offline_mode),
-  };
-
+  const policy = parseRawPolicyObject(raw, DEFAULT_POLICY);
   const policy_sha256 = createHash("sha256").update(JSON.stringify(policy)).digest("hex");
   return { policy, policy_path: loadedPath, policy_sha256 };
 }
 
-export function loadNpmrc(cwd: string): NpmrcConfig {
+/**
+ * Operator-controlled MCP policy loader (`[MCP-01]`):
+ * Loads base policy strictly from `COLDPIN_POLICY_PATH` -> `~/.coldpin.policy.json` -> `DEFAULT_POLICY`.
+ * Untrusted workspace `.coldpin.policy.json` files can ONLY apply additive tightening unless the
+ * operator explicitly sets `COLDPIN_TRUST_WORKSPACE_POLICY=1`.
+ */
+export function loadMcpPolicy(options: {
+  explicitPolicyPath?: string;
+  workspaceRoot?: string;
+  trustWorkspacePolicy?: boolean;
+  forceOffline?: boolean;
+}): {
+  policy: PolicyConfig;
+  policy_path: string | null;
+  policy_sha256: string;
+} {
+  const baseCandidates: string[] = [];
+  if (options.explicitPolicyPath) {
+    baseCandidates.push(resolve(options.explicitPolicyPath));
+  } else {
+    baseCandidates.push(join(homedir(), ".coldpin.policy.json"));
+    baseCandidates.push(join(homedir(), ".npx-guard.policy.json"));
+  }
+
+  let loadedPath: string | null = null;
+  let basePolicy: PolicyConfig = { ...DEFAULT_POLICY };
+  for (const p of baseCandidates) {
+    if (existsSync(p)) {
+      const raw = readPolicyJsonFile(p);
+      basePolicy = parseRawPolicyObject(raw, DEFAULT_POLICY);
+      loadedPath = p;
+      break;
+    }
+  }
+
+  let effectivePolicy = basePolicy;
+  if (options.workspaceRoot) {
+    const wsCandidates = [
+      join(resolve(options.workspaceRoot), ".coldpin.policy.json"),
+      join(resolve(options.workspaceRoot), ".npx-guard.policy.json"),
+    ];
+    for (const wp of wsCandidates) {
+      if (existsSync(wp)) {
+        try {
+          const wsRaw = readPolicyJsonFile(wp);
+          const wsParsed = parseRawPolicyObject(wsRaw, basePolicy);
+          effectivePolicy = options.trustWorkspacePolicy
+            ? wsParsed
+            : mergePolicyAdditiveTighteningOnly(basePolicy, wsParsed);
+          if (!loadedPath && options.trustWorkspacePolicy) loadedPath = wp;
+        } catch {
+          // Malformed workspace policy cannot crash or downgrade the operator policy
+        }
+        break;
+      }
+    }
+  }
+
+  if (options.forceOffline) {
+    effectivePolicy = { ...effectivePolicy, offline_mode: true };
+  }
+
+  const policy_sha256 = createHash("sha256").update(JSON.stringify(effectivePolicy)).digest("hex");
+  return { policy: effectivePolicy, policy_path: loadedPath, policy_sha256 };
+}
+
+export interface LoadNpmrcOptions {
+  /** Optional server-pinned `.npmrc` path trusted for `_authToken` entries. */
+  pinnedNpmrcPath?: string;
+  /** Whether workspace `.npmrc` files may contribute `registry` / `@scope:registry` mappings (default true). Workspace files NEVER contribute `:_authToken`. */
+  includeWorkspaceRegistries?: boolean;
+}
+
+export function loadNpmrc(cwd: string, options: LoadNpmrcOptions = {}): NpmrcConfig {
   const result: NpmrcConfig = {
     paths_loaded: [],
     scoped_registries: {},
     auth_token_env_by_host: {},
   };
 
-  const candidatePaths: string[] = [];
+  const entries: Array<{ path: string; allowAuthTokens: boolean }> = [];
   const homeRc = join(homedir(), ".npmrc");
-  if (existsSync(homeRc)) candidatePaths.push(homeRc);
-  const gitRoot = findGitRoot(cwd);
-  if (gitRoot && gitRoot !== resolve(cwd)) {
-    const rootRc = join(gitRoot, ".npmrc");
-    if (existsSync(rootRc)) candidatePaths.push(rootRc);
-  }
-  const cwdRc = join(resolve(cwd), ".npmrc");
-  if (existsSync(cwdRc)) candidatePaths.push(cwdRc);
+  if (existsSync(homeRc)) entries.push({ path: homeRc, allowAuthTokens: true });
 
-  for (const rcPath of candidatePaths) {
+  if (options.pinnedNpmrcPath) {
+    const pinned = resolve(options.pinnedNpmrcPath);
+    if (existsSync(pinned) && pinned !== homeRc) {
+      entries.push({ path: pinned, allowAuthTokens: true });
+    }
+  }
+
+  const includeWs = options.includeWorkspaceRegistries ?? true;
+  if (includeWs) {
+    const gitRoot = findGitRoot(cwd);
+    if (gitRoot && gitRoot !== resolve(cwd)) {
+      const rootRc = join(gitRoot, ".npmrc");
+      if (existsSync(rootRc) && rootRc !== homeRc) {
+        entries.push({ path: rootRc, allowAuthTokens: false });
+      }
+    }
+    const cwdRc = join(resolve(cwd), ".npmrc");
+    if (existsSync(cwdRc) && cwdRc !== homeRc) {
+      entries.push({ path: cwdRc, allowAuthTokens: false });
+    }
+  }
+
+  for (const { path: rcPath, allowAuthTokens } of entries) {
+    let content: string;
+    try {
+      content = readCappedRegularFileSync(rcPath, MAX_NPMRC_BYTES).toString("utf8");
+    } catch {
+      continue;
+    }
     result.paths_loaded.push(rcPath);
-    const lines = readFileSync(rcPath, "utf8").split(/\r?\n/);
+    const lines = content.split(/\r?\n/);
     for (const rawLine of lines) {
       const line = rawLine.trim();
       if (!line || line.startsWith("#") || line.startsWith(";")) continue;
@@ -229,10 +395,11 @@ export function loadNpmrc(cwd: string): NpmrcConfig {
       } else if (key.startsWith("@") && key.endsWith(":registry")) {
         const scope = key.slice(0, -":registry".length).toLowerCase();
         result.scoped_registries[scope] = val.replace(/\/+$/, "");
-      } else if (key.startsWith("//") && key.endsWith(":_authToken")) {
-        const hostPath = key.slice(2, -":_authToken".length).replace(/\/+$/, "");
+      } else if (allowAuthTokens && key.startsWith("//") && key.endsWith(":_authToken")) {
+        // Security [MCP-09]: parse `:_authToken` ONLY from $HOME/.npmrc or operator-pinned config
+        const hostPath = key.slice(2, -":_authToken".length).replace(/^\/+|\/+$/g, "");
         const envMatch = /^\$\{([A-Z0-9_]+)\}$/.exec(val);
-        if (envMatch?.[1]) {
+        if (hostPath && envMatch?.[1]) {
           result.auth_token_env_by_host[hostPath] = envMatch[1];
         }
       }
@@ -246,12 +413,26 @@ export function loadNpmrc(cwd: string): NpmrcConfig {
   return result;
 }
 
-function resolveAuthTokenForUrl(registryUrl: string, npmrc: NpmrcConfig): string | undefined {
+function normalizeHostPathKey(rawKey: string): string {
+  const trimmed = rawKey.replace(/^\/+|\/+$/g, "");
+  const slashIdx = trimmed.indexOf("/");
+  if (slashIdx === -1) return trimmed.toLowerCase();
+  return `${trimmed.slice(0, slashIdx).toLowerCase()}${trimmed.slice(slashIdx)}`;
+}
+
+export function resolveAuthTokenForUrl(registryUrl: string, npmrc: NpmrcConfig): string | undefined {
   try {
     const parsed = new URL(registryUrl);
-    const hostAndPath = `${parsed.host}${parsed.pathname}`.replace(/\/+$/, "");
+    // Security [MCP-09]: never resolve Bearer credentials for non-HTTPS URLs
+    if (parsed.protocol !== "https:") return undefined;
+    const hostLower = parsed.host.toLowerCase();
+    const pathClean = parsed.pathname.replace(/\/+$/, "");
+    const hostAndPath = pathClean ? `${hostLower}${pathClean}` : hostLower;
     for (const [k, envVar] of Object.entries(npmrc.auth_token_env_by_host)) {
-      if (hostAndPath.startsWith(k) || parsed.host === k) {
+      const kNorm = normalizeHostPathKey(k);
+      if (!kNorm) continue;
+      // Security [MCP-09]: exact host or '/'-segment boundary match (prevents corp.local.evil.com matching corp.local)
+      if (hostAndPath === kNorm || hostAndPath.startsWith(`${kNorm}/`)) {
         return process.env[envVar];
       }
     }
@@ -369,22 +550,64 @@ export function routeRegistry(
   };
 }
 
+function extractDiscoveryTokens(rawValue: string): string[] {
+  const out: string[] = [];
+  for (const rawTok of rawValue.split(/\s+/).filter(Boolean)) {
+    const cleaned = rawTok.replace(/^["'`(,]+|["'`),.;:]+$/g, "");
+    if (!cleaned) continue;
+    out.push(cleaned);
+    // Unwrap npm search qualifiers such as `scope:acme`, `maintainer:acme-internal-bot`, `keywords:@acme/foo`
+    const qualMatch = /^(?:scope|maintainer|author|keywords|not):(.+)$/i.exec(cleaned);
+    if (qualMatch?.[1]) {
+      const inner = qualMatch[1].trim();
+      out.push(inner);
+      if (cleaned.toLowerCase().startsWith("scope:") && !inner.startsWith("@")) {
+        out.push(`@${inner}`);
+      }
+    }
+  }
+  return out;
+}
+
 /**
- * Inspects every whitespace-separated token in a multi-word discovery query so an
- * internal scope or prefix embedded after other search words (e.g. "find @acme/cli")
- * cannot accidentally leak to public registry.npmjs.org.
+ * Inspects every whitespace-separated token across `query`, `org`, `creator`, and `category`
+ * so internal scopes, private prefixes, `scope:` qualifiers, or secret-shaped strings cannot
+ * leak to public `registry.npmjs.org` (`[MCP-04]`).
  */
 export function routeDiscoveryQuery(
   query: string,
   org: string | undefined,
   policy: PolicyConfig,
   npmrc: NpmrcConfig,
+  extra?: { creator?: string; category?: string },
 ): RegistryRouteResult {
-  const tokens: string[] = [];
-  if (org?.trim()) tokens.push(org.trim().startsWith("@") ? org.trim() : `@${org.trim()}`);
-  for (const tok of query.split(/\s+/).filter(Boolean)) {
-    tokens.push(tok.replace(/^["'`(,]+|["'`),.;:]+$/g, ""));
+  const allRawFields = [query, org ?? "", extra?.creator ?? "", extra?.category ?? ""];
+  for (const field of allRawFields) {
+    if (hasSecretLikeDiscoveryToken(field)) {
+      return {
+        route: "blocked_secret",
+        registry_url: "",
+        reason: "Blocked discovery query containing credential-shaped or secret-like material.",
+      };
+    }
   }
+
+  const tokens: string[] = [];
+  if (org?.trim()) {
+    const trimmedOrg = org.trim();
+    tokens.push(trimmedOrg.startsWith("@") ? trimmedOrg : `@${trimmedOrg}`);
+    tokens.push(...extractDiscoveryTokens(trimmedOrg));
+  }
+  tokens.push(...extractDiscoveryTokens(query));
+  if (extra?.creator?.trim()) {
+    const c = extra.creator.trim();
+    tokens.push(...extractDiscoveryTokens(c));
+    if (!c.startsWith("@")) tokens.push(`@${c}`);
+  }
+  if (extra?.category?.trim()) {
+    tokens.push(...extractDiscoveryTokens(extra.category.trim()));
+  }
+
   let privateMatch: RegistryRouteResult | null = null;
   for (const tok of tokens) {
     if (!tok) continue;
@@ -399,20 +622,20 @@ export function routeDiscoveryQuery(
   return privateMatch ?? routeRegistry(tokens[0] ?? "", policy, npmrc);
 }
 
-export function probeHostCapabilities(): HostCapabilities {
+export async function probeHostCapabilitiesAsync(): Promise<HostCapabilities> {
   let gitAvailable = false;
   let gitPartialCloneSupported = false;
   let reaCliAvailable = false;
   let reaCliCommand: string | undefined;
 
   try {
-    const out = execFileSync("git", ["--version"], {
+    const { stdout } = await execFileAsync("git", ["--version"], {
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
       timeout: 3000,
+      windowsHide: true,
     });
-    gitAvailable = out.toLowerCase().includes("git version");
-    const verMatch = /(\d+)\.(\d+)/.exec(out);
+    gitAvailable = stdout.toLowerCase().includes("git version");
+    const verMatch = /(\d+)\.(\d+)/.exec(stdout);
     if (verMatch?.[1] && verMatch[2]) {
       const maj = Number(verMatch[1]);
       const min = Number(verMatch[2]);
@@ -424,10 +647,10 @@ export function probeHostCapabilities(): HostCapabilities {
 
   for (const candidate of ["rea", "rea-agents"]) {
     try {
-      execFileSync(candidate, ["--version"], {
+      await execFileAsync(candidate, ["--version"], {
         encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
         timeout: 2000,
+        windowsHide: true,
       });
       reaCliAvailable = true;
       reaCliCommand = candidate;

@@ -15,7 +15,7 @@ DAYS = int(sys.argv[1]) if len(sys.argv) > 1 else 30
 TODAY = datetime.date.today()
 
 TARGETS = (
-    sorted((ROOT / "skill-src" / "coldpin" / "references").glob("*.md"))
+    sorted((ROOT / "skills" / "coldpin" / "references").glob("*.md"))
     + [ROOT / "docs" / "fact-ledger.md", ROOT / "MAINTENANCE.md"]
 )
 

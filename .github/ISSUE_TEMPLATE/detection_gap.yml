@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         **Defensive-Only Policy:** Never post live malware URLs, active C2 infrastructure, weaponized exploit payloads, private tokens, or secrets in public issues.
-        If you have found an exploitable security bypass (such as an archive escape, private-scope leak, or prompt-injection bypass), report it privately via [GitHub Private Vulnerability Reporting](https://github.com/hynko431/Coldpin---npx-Safe-Finder/security/advisories/new).
+        If you have found an exploitable security bypass (such as an archive escape, private-scope leak, or prompt-injection bypass), report it privately via [GitHub Private Vulnerability Reporting](https://github.com/hynko431/Coldpin-npx-Safe-Finder/security/advisories/new).
 
   - type: dropdown
     id: gap_type

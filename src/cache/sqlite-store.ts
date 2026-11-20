@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { chmodSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { CACHE_SCHEMA_VERSION, ENGINE_VERSION } from "../types.ts";
@@ -19,18 +19,31 @@ function openSqliteWithFallback(preferredPath: string): { db: DatabaseSync; reso
   if (preferredPath === ":memory:") {
     return { db: new DatabaseSync(":memory:"), resolvedPath: ":memory:" };
   }
-  const candidates = [preferredPath, join(tmpdir(), "coldpin", "cache.sqlite")];
-  for (const p of candidates) {
-    try {
-      mkdirSync(dirname(p), { recursive: true });
-      const db = new DatabaseSync(p);
-      db.exec("PRAGMA journal_mode = WAL;");
-      return { db, resolvedPath: p };
-    } catch {
-      // Fall back to tmpdir or in-memory SQLite when host/sandbox restricts AppData/HOME writes
+  // Never fall back to world-writable shared tmpdir() (prevents multi-user /tmp cache race [MCP-13]);
+  // fall directly to isolated in-memory SQLite when preferred user/plugin cache path is unwritable.
+  try {
+    const parentDir = dirname(preferredPath);
+    mkdirSync(parentDir, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") {
+      try {
+        chmodSync(parentDir, 0o700);
+      } catch {
+        // Best-effort owner-only directory permissions
+      }
     }
+    const db = new DatabaseSync(preferredPath);
+    if (process.platform !== "win32") {
+      try {
+        chmodSync(preferredPath, 0o600);
+      } catch {
+        // Best-effort owner-only database file permissions
+      }
+    }
+    db.exec("PRAGMA journal_mode = WAL;");
+    return { db, resolvedPath: preferredPath };
+  } catch {
+    return { db: new DatabaseSync(":memory:"), resolvedPath: ":memory:" };
   }
-  return { db: new DatabaseSync(":memory:"), resolvedPath: ":memory:" };
 }
 
 export function buildFactCacheKey(params: {
@@ -56,26 +69,52 @@ export function buildFactCacheKey(params: {
   return createHash("sha256").update(raw).digest("hex");
 }
 
+export function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(new Error("Operation aborted"));
+  }
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    const onAbort = () => {
+      rejectPromise(new Error("Operation aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (val) => {
+        signal.removeEventListener("abort", onAbort);
+        resolvePromise(val);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        rejectPromise(err);
+      },
+    );
+  });
+}
+
 /**
  * Producer-once in-flight deduplicator (REA `rea-analysis-optimization` pattern).
  * Coalesces concurrent identical async lookups so work runs once per key without
- * letting a single caller failure corrupt unrelated keys.
+ * letting a single caller failure or cancellation corrupt unrelated waiters.
  */
 export class SingleFlight<T> {
   private readonly inflight = new Map<string, Promise<T>>();
 
-  run(key: string, producer: () => Promise<T>): Promise<T> {
-    const existing = this.inflight.get(key);
-    if (existing) return existing;
-    const promise = Promise.resolve()
-      .then(producer)
-      .finally(() => {
-        if (this.inflight.get(key) === promise) {
-          this.inflight.delete(key);
-        }
-      });
-    this.inflight.set(key, promise);
-    return promise;
+  run(key: string, producer: () => Promise<T>, callerSignal?: AbortSignal): Promise<T> {
+    let promise = this.inflight.get(key);
+    if (!promise) {
+      promise = Promise.resolve()
+        .then(producer)
+        .finally(() => {
+          if (this.inflight.get(key) === promise) {
+            this.inflight.delete(key);
+          }
+        });
+      // Prevent unhandled rejection if every waiter aborts before the shared producer settles
+      promise.catch(() => undefined);
+      this.inflight.set(key, promise);
+    }
+    return raceWithAbort(promise, callerSignal);
   }
 
   get activeCount(): number {

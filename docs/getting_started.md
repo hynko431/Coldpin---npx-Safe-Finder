@@ -12,15 +12,16 @@
 Clone the repository directly (no `npm install` step required):
 
 ```sh
-git clone https://github.com/hynko431/Coldpin---npx-Safe-Finder.git
-cd Coldpin---npx-Safe-Finder
-node --no-warnings src/cli.ts --help
+git clone https://github.com/hynko431/Coldpin-npx-Safe-Finder.git
+cd Coldpin-npx-Safe-Finder
+node --no-warnings lib/cli.mjs --help
+node --no-warnings lib/mcp.mjs   # or: coldpin mcp
 ```
 
 ## Core Workflow Loop
 
 1. **Configure Enterprise Policy (Optional for Public Use, Required for Private Orgs):**
-   Copy [examples/.coldpin.policy.example.json](../examples/.coldpin.policy.example.json) and [examples/.npmrc.example](../examples/.npmrc.example) into your repository root declaring `private_scopes`, `private_prefixes`, `private_registries`, `cooldown_hours`, and CVE/KEV thresholds. See [enterprise-policy-schema.md](../skill-src/coldpin/references/enterprise-policy-schema.md).
+   Copy [examples/.coldpin.policy.example.json](../examples/.coldpin.policy.example.json) and [examples/.npmrc.example](../examples/.npmrc.example) into your repository root declaring `private_scopes`, `private_prefixes`, `private_registries`, `cooldown_hours`, and CVE/KEV thresholds. In MCP mode, pin operator policy via `COLDPIN_POLICY_PATH` and allowed local roots via `COLDPIN_ALLOWED_ROOTS`. See [enterprise-policy-schema.md](../skills/coldpin/references/enterprise-policy-schema.md).
 2. **Discover Candidates (`discover`):**
    ```sh
    node --no-warnings src/cli.ts discover "lint" --category cli --limit 10

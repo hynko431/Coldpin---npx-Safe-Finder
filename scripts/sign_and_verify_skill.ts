@@ -14,7 +14,7 @@ import { lstatSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
-const SKILL_DIR = join(ROOT, "skill-src", "coldpin");
+const SKILL_DIR = join(ROOT, "skills", "coldpin");
 const SIG_PATH = join(SKILL_DIR, "skill.oms.sig");
 const PAYLOAD_TYPE = "application/vnd.in-toto+json";
 
