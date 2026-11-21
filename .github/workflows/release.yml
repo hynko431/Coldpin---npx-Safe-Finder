@@ -152,6 +152,7 @@ jobs:
     needs: [build-and-verify, publish-github-release]
     if: needs.build-and-verify.outputs.release_tag != ''
     runs-on: ubuntu-latest
+    environment: npm-publish
     permissions:
       contents: read
       id-token: write
