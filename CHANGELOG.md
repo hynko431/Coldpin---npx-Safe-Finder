@@ -2,6 +2,11 @@
 
 All notable changes to `coldpin` (Coldpin; originally drafted under working title `npx-safe-finder`) are documented here following [Keep a Changelog](https://keepachangelog.com/) and Semantic Versioning.
 
+## [1.5.2] - 2026-11-22
+
+### Fixed
+- **npm CDN Propagation Guard & Idempotent MCP Registry Publishing (`.github/workflows/release.yml`):** Replaced bare `npm view` existence probes in `publish-npm` with cache-busting query-parameter checks so Cloudflare's bare-URL `max-age=300` negative `404` cache is never poisoned before `npm publish`, added a dedicated origin-propagation wait step in `publish-mcp-registry` verifying both `registry.npmjs.org` version metadata (`mcpName` match) and tarball readiness before calling `mcp-publisher`, and wrapped `./mcp-publisher publish` in bounded transient-error retries with live Official MCP Registry idempotency checks.
+
 ## [1.5.1] - 2026-11-22
 
 ### Added

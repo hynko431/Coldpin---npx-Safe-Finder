@@ -10,12 +10,12 @@ Tier 1 (static validation, hygiene, SkillSpector self-audit) and Tier 2 (49-fixt
 
 ## Evaluation Metadata
 
-- Skill: `coldpin` (`v1.5.1`)
+- Skill: `coldpin` (`v1.5.2`)
 - Evaluation date: `2026-11-21`
 - Host runtime: `Node v24.1.0` on `win32/x64`
 - Corpus: 49 deterministic fixtures (21 benign CLI archetypes + 28 adversarial/fail-closed attacks) + 35 mutation checks + 10 trigger selection prompts (5 positive + 5 negative decoys)
-- Dataset digest: `sha256:08e6d14e1d4a2067383bd61377ec489fca59c4d556edd35a81684d3afd255617` (`evals/evals.json` + `tests/selection.jsonl` + `tests/benchmark-corpus.ts` + `catalog/triage-rules.json`)
-- Peak process RSS observed: `95.1 MiB`
+- Dataset digest: `sha256:fd98df56d512949385d20fa76262f124ae86e692bc5d62a98ac65167cdd67366` (`evals/evals.json` + `tests/selection.jsonl` + `tests/benchmark-corpus.ts` + `catalog/triage-rules.json`)
+- Peak process RSS observed: `97.5 MiB`
 - Tier 1 evidence: **Executed locally**
 - Tier 2 evidence: **Executed locally**
 - Tier 3 evidence: **Not run** (requires live LLM API keys + isolated sandbox containers)
@@ -36,62 +36,62 @@ Tier 1 (static validation, hygiene, SkillSpector self-audit) and Tier 2 (49-fixt
 | Security (False-Positive Rate) | `0.0%` (0/21 benign CLIs misclassified; target `< 5%`) | `N/A` (not run) |
 | Correctness (Mutation Proofs) | `100.0%` (35/35 regressions caught red) | `N/A` (not run) |
 | Discoverability (Trigger Proxy) | `100.0%` (5/5 positive matched, 5/5 decoys avoided) | `N/A` (not run) |
-| Latency (Tier 1 In-Memory Unpack + Triage) | Benign p50 `5.01 ms`, p95 `15.34 ms` · Adv p95 `6.70 ms` | `N/A` (not run) |
-| Efficiency (Git Bisect Split-Plane SQLite Cache) | Cold `5136.1 ms` (84 intra-run hits) → Warm `2176.2 ms` (104 hits across 8 walked commits) | `N/A` (not run) |
+| Latency (Tier 1 In-Memory Unpack + Triage) | Benign p50 `3.22 ms`, p95 `7.54 ms` · Adv p95 `4.79 ms` | `N/A` (not run) |
+| Efficiency (Git Bisect Split-Plane SQLite Cache) | Cold `5409.2 ms` (84 intra-run hits) → Warm `2337.0 ms` (104 hits across 8 walked commits) | `N/A` (not run) |
 
 ## Executed Corpus Breakdown
 
 | Case ID | Category | Verdict | Pass | Elapsed (ms) |
 |---|---|---|---:|---:|
-| `benign-01-json-formatter` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 38.89 |
-| `benign-02-comments-mentioning-eval` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 6.14 |
-| `benign-03-color-env-vars` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 8.11 |
-| `benign-04-typescript-source` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 8.78 |
-| `benign-05-short-cli-tsx` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 3.49 |
-| `benign-06-short-cli-zx` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 2.80 |
-| `benign-07-scoped-org-cli` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 3.31 |
-| `benign-08-localhost-dev-server` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 4.20 |
-| `benign-09-readme-markdown` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 5.58 |
-| `benign-10-legit-eslint-target` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 3.46 |
-| `benign-11-regex-url-parser` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 4.12 |
-| `benign-12-map-get-cache` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 5.01 |
-| `benign-13-template-logging` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 4.34 |
-| `benign-14-http-client-no-creds` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 5.41 |
-| `benign-15-esm-cli-args` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 4.66 |
-| `benign-16-multifile-esm-path-join` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 4.40 |
-| `benign-17-static-import-and-aliased-git` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 6.15 |
-| `benign-18-multihop-clean-fetch-helper` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 3.94 |
-| `benign-19-regex-var-and-array-literal` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 5.29 |
-| `benign-20-esbuild-scoped-env-alias` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 6.50 |
-| `benign-21-unicode-regexp-parser` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 15.34 |
-| `adv-01-postinstall-curl-pipe-sh` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 6.70 |
-| `adv-02-cred-taint-exfiltration` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.48 |
-| `adv-03-folded-computed-eval` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.93 |
-| `adv-04-base64-hidden-shell` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 4.31 |
-| `adv-05-zip-slip-traversal` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.06 |
-| `adv-06-duplicate-tar-differential` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.59 |
-| `adv-07-zip-bomb-cap` | adversarial | `QUARANTINE_SUSPICIOUS` | PASS | 15.00 |
-| `adv-08-indirect-prompt-injection-bidi` | adversarial | `QUARANTINE_SUSPICIOUS` | PASS | 2.60 |
-| `adv-09-typosquat-homoglyph-es1int` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.92 |
-| `adv-10-uninspected-wasm-fail-closed` | adversarial | `UNVERIFIABLE_UNKNOWN` | PASS | 3.49 |
-| `adv-11-template-literal-taint-exfil` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.73 |
-| `adv-12-unicode-escape-eval` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.85 |
-| `adv-13-multihop-taint-dns-exfil` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.97 |
-| `adv-14-child-process-curl-pipe` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.70 |
-| `adv-15-hex-obfuscator-0x` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 4.60 |
-| `adv-16-cross-file-split-taint` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 5.61 |
-| `adv-17-manifest-bin-shell-injection` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.35 |
-| `adv-18-path-join-ssh-key-steal` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.89 |
-| `adv-19-reflect-env-and-wrapper-sink` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 4.46 |
-| `adv-20-tar-eof-polyglot-smuggling` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 4.40 |
-| `adv-21-computed-dynamic-import-data-uri` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.53 |
-| `adv-22-aliased-esm-child-process-exec` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.96 |
-| `adv-23-multihop-wrapper-and-indirect-eval` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 4.17 |
-| `adv-24-cross-file-exported-sink-wrapper` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 4.39 |
-| `adv-25-no-semi-indirect-call-opt-chain` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.88 |
-| `adv-26-create-require-and-barrel-reexport` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.98 |
-| `adv-27-closure-captured-taint` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 4.67 |
-| `adv-28-dense-hex-escape-obfuscation` | adversarial | `QUARANTINE_SUSPICIOUS` | PASS | 4.34 |
+| `benign-01-json-formatter` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 35.42 |
+| `benign-02-comments-mentioning-eval` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 4.50 |
+| `benign-03-color-env-vars` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 5.81 |
+| `benign-04-typescript-source` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 7.54 |
+| `benign-05-short-cli-tsx` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 2.78 |
+| `benign-06-short-cli-zx` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 2.15 |
+| `benign-07-scoped-org-cli` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 2.69 |
+| `benign-08-localhost-dev-server` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 2.83 |
+| `benign-09-readme-markdown` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 3.22 |
+| `benign-10-legit-eslint-target` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 1.98 |
+| `benign-11-regex-url-parser` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 2.76 |
+| `benign-12-map-get-cache` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 2.93 |
+| `benign-13-template-logging` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 2.60 |
+| `benign-14-http-client-no-creds` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 3.56 |
+| `benign-15-esm-cli-args` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 3.55 |
+| `benign-16-multifile-esm-path-join` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 2.61 |
+| `benign-17-static-import-and-aliased-git` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 3.79 |
+| `benign-18-multihop-clean-fetch-helper` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 2.53 |
+| `benign-19-regex-var-and-array-literal` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 4.20 |
+| `benign-20-esbuild-scoped-env-alias` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 4.04 |
+| `benign-21-unicode-regexp-parser` | benign | `VERIFIED_CLEAN_WITHIN_SCOPE` | PASS | 7.44 |
+| `adv-01-postinstall-curl-pipe-sh` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 4.79 |
+| `adv-02-cred-taint-exfiltration` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.99 |
+| `adv-03-folded-computed-eval` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.14 |
+| `adv-04-base64-hidden-shell` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.02 |
+| `adv-05-zip-slip-traversal` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.33 |
+| `adv-06-duplicate-tar-differential` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.13 |
+| `adv-07-zip-bomb-cap` | adversarial | `QUARANTINE_SUSPICIOUS` | PASS | 14.24 |
+| `adv-08-indirect-prompt-injection-bidi` | adversarial | `QUARANTINE_SUSPICIOUS` | PASS | 2.44 |
+| `adv-09-typosquat-homoglyph-es1int` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.69 |
+| `adv-10-uninspected-wasm-fail-closed` | adversarial | `UNVERIFIABLE_UNKNOWN` | PASS | 2.79 |
+| `adv-11-template-literal-taint-exfil` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.50 |
+| `adv-12-unicode-escape-eval` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.33 |
+| `adv-13-multihop-taint-dns-exfil` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.45 |
+| `adv-14-child-process-curl-pipe` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.83 |
+| `adv-15-hex-obfuscator-0x` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.70 |
+| `adv-16-cross-file-split-taint` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.63 |
+| `adv-17-manifest-bin-shell-injection` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.19 |
+| `adv-18-path-join-ssh-key-steal` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.62 |
+| `adv-19-reflect-env-and-wrapper-sink` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.64 |
+| `adv-20-tar-eof-polyglot-smuggling` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 4.44 |
+| `adv-21-computed-dynamic-import-data-uri` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.73 |
+| `adv-22-aliased-esm-child-process-exec` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.51 |
+| `adv-23-multihop-wrapper-and-indirect-eval` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.81 |
+| `adv-24-cross-file-exported-sink-wrapper` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.87 |
+| `adv-25-no-semi-indirect-call-opt-chain` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.46 |
+| `adv-26-create-require-and-barrel-reexport` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 3.30 |
+| `adv-27-closure-captured-taint` | adversarial | `MALICIOUS_INDICATORS_FOUND` | PASS | 2.74 |
+| `adv-28-dense-hex-escape-obfuscation` | adversarial | `QUARANTINE_SUSPICIOUS` | PASS | 2.47 |
 
 ## Mutation / Anti-Drift Verification (REA `rea-ci-tests-audit` Pattern)
 
