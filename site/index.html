@@ -3,668 +3,723 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Coldpin — Documentation (v1.5.0)</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none';">
+  <meta name="referrer" content="no-referrer">
+  <title>Coldpin Documentation (v1.5.0)</title>
   <meta name="description" content="Inspect npx packages cold in memory, verify tarball-to-source parity, and pin verified clean releases with zero execution.">
   <link rel="icon" type="image/svg+xml" href="./icon.svg">
-  <style>
-    :root {
-      --bg: #f8fafc;
-      --surface: #ffffff;
-      --surface-alt: #f1f5f9;
-      --text: #0f172a;
-      --muted: #475569;
-      --border: #e2e8f0;
-      --accent: #0f766e;
-      --accent-strong: #115e59;
-      --accent-soft: #ccfbf1;
-      --accent-text: #134e4a;
-      --code-bg: #0f172a;
-      --code-text: #e2e8f0;
-      --radius: 12px;
-      --shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.04);
-    }
-    [data-theme="dark"] {
-      --bg: #0b1120;
-      --surface: #111827;
-      --surface-alt: #1e293b;
-      --text: #f1f5f9;
-      --muted: #94a3b8;
-      --border: #1e293b;
-      --accent: #2dd4bf;
-      --accent-strong: #5eead4;
-      --accent-soft: rgba(45, 212, 191, 0.14);
-      --accent-text: #99f6e4;
-      --code-bg: #020617;
-      --code-text: #e2e8f0;
-      --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 28px rgba(0, 0, 0, 0.25);
-    }
-    @media (prefers-color-scheme: dark) {
-      :root:not([data-theme="light"]) {
-        --bg: #0b1120;
-        --surface: #111827;
-        --surface-alt: #1e293b;
-        --text: #f1f5f9;
-        --muted: #94a3b8;
-        --border: #1e293b;
-        --accent: #2dd4bf;
-        --accent-strong: #5eead4;
-        --accent-soft: rgba(45, 212, 191, 0.14);
-        --accent-text: #99f6e4;
-        --code-bg: #020617;
-        --code-text: #e2e8f0;
-        --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 28px rgba(0, 0, 0, 0.25);
-      }
-    }
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
-    body {
-      margin: 0;
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.6;
-      -webkit-font-smoothing: antialiased;
-    }
-    .skip-link {
-      position: absolute;
-      left: -9999px;
-      top: 0;
-      padding: 0.75rem 1rem;
-      background: var(--accent);
-      color: #ffffff;
-      z-index: 100;
-    }
-    .skip-link:focus { left: 1rem; top: 1rem; border-radius: 6px; }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .container { max-width: 1080px; margin: 0 auto; padding: 0 1.25rem; }
-    header {
-      position: sticky;
-      top: 0;
-      z-index: 50;
-      background: color-mix(in srgb, var(--surface) 88%, transparent);
-      backdrop-filter: blur(10px);
-      border-bottom: 1px solid var(--border);
-    }
-    .nav {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 1rem;
-      min-height: 64px;
-      flex-wrap: wrap;
-      padding: 0.5rem 0;
-    }
-    .brand {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.625rem;
-      font-weight: 700;
-      font-size: 1.1rem;
-      color: var(--text);
-    }
-    .brand:hover { text-decoration: none; }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      padding: 0.15rem 0.55rem;
-      border-radius: 999px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      background: var(--accent-soft);
-      color: var(--accent-text);
-    }
-    .nav-links {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      flex-wrap: wrap;
-      font-size: 0.9rem;
-    }
-    .nav-links a { color: var(--muted); font-weight: 500; }
-    .nav-links a:hover { color: var(--text); text-decoration: none; }
-    .theme-btn {
-      border: 1px solid var(--border);
-      background: var(--surface-alt);
-      color: var(--text);
-      padding: 0.35rem 0.7rem;
-      border-radius: 8px;
-      font-size: 0.82rem;
-      font-weight: 600;
-      cursor: pointer;
-    }
-    .theme-btn:hover { border-color: var(--accent); }
-    main { padding: 2.5rem 0 4rem; }
-    .hero {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 2.25rem;
-      box-shadow: var(--shadow);
-      margin-bottom: 2rem;
-    }
-    .hero-top {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      flex-wrap: wrap;
-      margin-bottom: 0.85rem;
-    }
-    h1 {
-      margin: 0 0 0.75rem;
-      font-size: clamp(1.75rem, 3.2vw, 2.5rem);
-      line-height: 1.2;
-      letter-spacing: -0.02em;
-    }
-    .lead {
-      margin: 0 0 1.4rem;
-      font-size: 1.06rem;
-      color: var(--muted);
-      max-width: 72ch;
-    }
-    .cta-row {
-      display: flex;
-      gap: 0.75rem;
-      flex-wrap: wrap;
-      margin-bottom: 1.5rem;
-    }
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.45rem;
-      padding: 0.6rem 1rem;
-      border-radius: 9px;
-      font-weight: 600;
-      font-size: 0.9rem;
-      border: 1px solid var(--border);
-      background: var(--surface-alt);
-      color: var(--text);
-    }
-    .btn:hover { text-decoration: none; border-color: var(--accent); }
-    .btn-primary {
-      background: #0f766e;
-      border-color: #0f766e;
-      color: #ffffff;
-    }
-    .btn-primary:hover { background: #115e59; border-color: #115e59; }
-    .metrics {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 0.75rem;
-    }
-    .metric {
-      background: var(--surface-alt);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 0.85rem 1rem;
-    }
-    .metric-val {
-      display: block;
-      font-size: 1.2rem;
-      font-weight: 700;
-      color: var(--text);
-    }
-    .metric-label {
-      font-size: 0.8rem;
-      color: var(--muted);
-    }
-    section { margin-top: 2.5rem; }
-    h2 {
-      margin: 0 0 0.9rem;
-      font-size: 1.45rem;
-      letter-spacing: -0.015em;
-      padding-bottom: 0.45rem;
-      border-bottom: 1px solid var(--border);
-    }
-    h3 { margin: 1.25rem 0 0.5rem; font-size: 1.05rem; }
-    p { margin: 0 0 0.85rem; }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
-      gap: 1rem;
-    }
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 1.2rem;
-      box-shadow: var(--shadow);
-    }
-    .card h3 { margin-top: 0; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
-    .card ul { margin: 0.4rem 0 0; padding-left: 1.15rem; color: var(--muted); font-size: 0.92rem; }
-    .card li { margin-bottom: 0.35rem; }
-    .code-wrap {
-      position: relative;
-      margin: 0.65rem 0 1rem;
-    }
-    pre {
-      margin: 0;
-      background: var(--code-bg);
-      color: var(--code-text);
-      padding: 1rem 4.5rem 1rem 1rem;
-      border-radius: 10px;
-      overflow-x: auto;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 0.86rem;
-      line-height: 1.5;
-    }
-    code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 0.88em;
-      background: var(--surface-alt);
-      padding: 0.12rem 0.36rem;
-      border-radius: 5px;
-    }
-    pre code { background: transparent; padding: 0; font-size: inherit; }
-    .copy-btn {
-      position: absolute;
-      top: 0.55rem;
-      right: 0.55rem;
-      border: 1px solid rgba(148, 163, 184, 0.35);
-      background: rgba(30, 41, 59, 0.85);
-      color: #f8fafc;
-      border-radius: 6px;
-      padding: 0.25rem 0.55rem;
-      font-size: 0.75rem;
-      font-weight: 600;
-      cursor: pointer;
-    }
-    .copy-btn:hover { border-color: #5eead4; }
-    .table-wrap {
-      overflow-x: auto;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.9rem;
-    }
-    th, td {
-      text-align: left;
-      padding: 0.75rem 0.9rem;
-      border-bottom: 1px solid var(--border);
-      vertical-align: top;
-    }
-    th {
-      background: var(--surface-alt);
-      font-weight: 600;
-      font-size: 0.82rem;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      color: var(--muted);
-    }
-    tr:last-child td { border-bottom: none; }
-    .notice {
-      background: var(--accent-soft);
-      color: var(--accent-text);
-      border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-      border-radius: var(--radius);
-      padding: 0.95rem 1.1rem;
-      font-size: 0.92rem;
-      margin: 1rem 0;
-    }
-    footer {
-      border-top: 1px solid var(--border);
-      padding: 2rem 0;
-      color: var(--muted);
-      font-size: 0.86rem;
-    }
-    .footer-grid {
-      display: flex;
-      justify-content: space-between;
-      gap: 1rem;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-    .footer-links { display: flex; gap: 1rem; flex-wrap: wrap; }
-  </style>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#main">Skip to content</a>
-  <header>
-    <div class="container nav">
-      <a class="brand" href="#top">
-        <img src="./icon.svg" alt="Coldpin logo" width="32" height="32">
-        <span>Coldpin</span>
-        <span class="badge">v1.5.0</span>
-      </a>
-      <nav class="nav-links" aria-label="Primary">
-        <a href="#install">Install</a>
-        <a href="#antigravity">Antigravity Plugin</a>
-        <a href="#tools">MCP &amp; CLI</a>
-        <a href="#security">Security &amp; Privacy</a>
-        <a href="#verification">Verification</a>
-        <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder">GitHub</a>
-        <button type="button" class="theme-btn" id="theme-toggle" aria-label="Toggle color theme">Theme</button>
-      </nav>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div id="live-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="header-left">
+        <button type="button" class="icon-btn mobile-menu-btn" id="mobile-menu-btn" aria-controls="docs-sidebar" aria-expanded="false">Menu</button>
+        <a class="brand-link" href="#introduction">
+          <img src="./icon.svg" alt="" width="28" height="28">
+          <span>Coldpin Docs</span>
+          <span class="brand-version">v1.5.0</span>
+        </a>
+      </div>
+
+      <div class="header-actions">
+        <button type="button" class="search-trigger" id="search-trigger" aria-label="Search documentation">
+          <span class="search-trigger-label">Search</span>
+          <kbd class="kbd">Ctrl K</kbd>
+        </button>
+        <a class="header-ext" href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases/tag/v1.5.0">Release</a>
+        <a class="header-ext" href="https://www.npmjs.com/package/coldpin">npm</a>
+        <a class="header-ext" href="https://github.com/hynko431/Coldpin-npx-Safe-Finder">GitHub</a>
+        <button type="button" class="icon-btn" id="theme-toggle" aria-label="Toggle color theme">Dark</button>
+      </div>
     </div>
   </header>
 
-  <main id="main" class="container">
-    <div id="top" class="hero">
-      <div class="hero-top">
-        <span class="badge">Apache-2.0</span>
-        <span class="badge">Node.js &gt;= 24.0.0</span>
-        <span class="badge">Antigravity &gt;= v1.5.13</span>
-        <span class="badge">Zero Runtime Dependencies</span>
+  <div class="docs-shell">
+    <nav id="docs-sidebar" class="sidebar" aria-label="Documentation navigation">
+      <div class="nav-group">
+        <p class="nav-group-title">Overview</p>
+        <ul class="nav-list">
+          <li><a class="nav-link" href="#introduction" aria-current="location">Introduction</a></li>
+          <li><a class="nav-link" href="#quickstart">Quickstart Install</a></li>
+          <li><a class="nav-link" href="#simulator">Interactive Policy Lab</a></li>
+        </ul>
       </div>
-      <h1>Inspect <code>npx</code> packages cold in memory. Pin verified clean releases.</h1>
-      <p class="lead">
-        Inspect <code>npx</code> packages cold in memory, verify tarball-to-source parity, and pin verified clean releases with zero execution.
-        Coldpin ships as a zero-dependency Node.js 24 CLI, local-first JSON-RPC 2.0 <code>stdio</code> MCP server (<code>io.github.hynko431/coldpin</code>),
-        and native 5-component Antigravity plugin (<code>rules/</code>, <code>agents/</code>, <code>skills/</code>, <code>hooks.json</code>, <code>mcp_config.json</code>).
-      </p>
-      <div class="cta-row">
-        <a class="btn btn-primary" href="#install">Quickstart Install</a>
-        <a class="btn" href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases/tag/v1.5.0">Release v1.5.0 (SLSA)</a>
-        <a class="btn" href="https://www.npmjs.com/package/coldpin">npm: coldpin</a>
-        <a class="btn" href="https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.hynko431/coldpin">Official MCP Registry</a>
-        <a class="btn" href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/issues">Support / Issues</a>
-      </div>
-      <div class="metrics">
-        <div class="metric">
-          <span class="metric-val">$0 / mo</span>
-          <span class="metric-label">100% local execution, 0 telemetry</span>
-        </div>
-        <div class="metric">
-          <span class="metric-val">0 Findings</span>
-          <span class="metric-label"><code>agy plugin validate --strict</code></span>
-        </div>
-        <div class="metric">
-          <span class="metric-val">100% / 0%</span>
-          <span class="metric-label">Recall / FPR (49-fixture corpus)</span>
-        </div>
-        <div class="metric">
-          <span class="metric-val">35 / 35</span>
-          <span class="metric-label">Security mutation proofs</span>
-        </div>
-        <div class="metric">
-          <span class="metric-val">APPROVE</span>
-          <span class="metric-label">SkillSpector self-audit (12/100)</span>
-        </div>
-      </div>
-    </div>
 
-    <section id="install">
-      <h2>Installation &amp; Quickstart</h2>
-      <p><strong>Prerequisites:</strong> Node.js <code>&gt;= 24.0.0</code>, Git <code>&gt;= 2.25</code> (for <code>resolve-anchor</code> and tarball-vs-Git parity), and Antigravity <code>&gt;= v1.5.13</code> for native plugin hooks. No mandatory API keys or MCP variables are required.</p>
+      <div class="nav-group">
+        <p class="nav-group-title">Antigravity Plugin</p>
+        <ul class="nav-list">
+          <li><a class="nav-link" href="#antigravity-plugin">5-Component Architecture</a></li>
+          <li><a class="nav-link" href="#agents-and-hooks">7 Agents, 3 Rules &amp; 3 Hooks</a></li>
+        </ul>
+      </div>
 
-      <h3>Antigravity (CLI, App &amp; IDE Extensions)</h3>
-      <div class="code-wrap">
-        <pre><code id="cmd-agy">agy plugin install https://github.com/hynko431/Coldpin-npx-Safe-Finder
+      <div class="nav-group">
+        <p class="nav-group-title">Reference</p>
+        <ul class="nav-list">
+          <li><a class="nav-link" href="#mcp-and-cli">7 MCP Tools &amp; 6 CLI Verbs</a></li>
+          <li><a class="nav-link" href="#harnesses">Harnesses &amp; Distribution</a></li>
+        </ul>
+      </div>
+
+      <div class="nav-group">
+        <p class="nav-group-title">Enterprise &amp; Security</p>
+        <ul class="nav-list">
+          <li><a class="nav-link" href="#configuration">Configuration &amp; Privacy</a></li>
+          <li><a class="nav-link" href="#verification">Verification &amp; Provenance</a></li>
+          <li><a class="nav-link" href="#faq">FAQ &amp; Epistemic Limits</a></li>
+        </ul>
+      </div>
+    </nav>
+
+    <main id="main-content" class="docs-main">
+      <article class="docs-article">
+        <section id="introduction" class="hero-block" data-group="Overview" data-search="coldpin npx npm security auditor zero execution introduction overview antigravity mcp">
+          <h1 class="doc-h1">Inspect npx packages cold. Pin clean releases.</h1>
+          <p class="doc-lead">
+            Coldpin is a zero-dependency Node.js 24 CLI, local <code>stdio</code> MCP server (<code>io.github.hynko431/coldpin</code>),
+            and native Antigravity plugin that vets npm tarballs in memory, verifies tarball-to-source parity,
+            and recovers pre-compromise release anchors without executing untrusted install scripts.
+          </p>
+
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="#quickstart">Install in Antigravity</a>
+            <a class="btn btn-secondary" href="#simulator">Try Hook Simulator</a>
+            <a class="btn btn-secondary" href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases/tag/v1.5.0">Release v1.5.0</a>
+          </div>
+
+          <dl class="spec-strip" aria-label="Verified v1.5.0 specifications">
+            <div class="spec-item">
+              <dt>Runtime &amp; Cost</dt>
+              <dd>Node &gt;= 24, 0 deps, $0/mo</dd>
+            </div>
+            <div class="spec-item">
+              <dt>Antigravity Strict</dt>
+              <dd>0 findings (5 primitives)</dd>
+            </div>
+            <div class="spec-item">
+              <dt>Benchmark Corpus</dt>
+              <dd>100.0% recall, 0.0% FPR</dd>
+            </div>
+            <div class="spec-item">
+              <dt>Self-Audit &amp; Proofs</dt>
+              <dd>APPROVE 12/100, 35/35</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section id="quickstart" class="doc-section" data-group="Overview" data-search="install quickstart setup antigravity npm cli claude code codex offline airgapped prerequisites">
+          <h2 class="doc-h2">Quickstart Install</h2>
+          <p class="prose">
+            Coldpin runs 100% locally with zero mandatory credentials or MCP variables.
+            Prerequisites: Node.js <code>&gt;= 24.0.0</code>, Git <code>&gt;= 2.25</code> (for commit bisection and Git parity),
+            and Antigravity <code>&gt;= v1.5.13</code> for native <code>PreToolUse</code> hooks.
+          </p>
+
+          <div class="tab-bar" role="tablist" aria-label="Install method">
+            <button type="button" class="tab-btn" role="tab" id="tab-agy" aria-controls="panel-agy" aria-selected="true" tabindex="0">Antigravity</button>
+            <button type="button" class="tab-btn" role="tab" id="tab-npm" aria-controls="panel-npm" aria-selected="false" tabindex="-1">npm / CLI</button>
+            <button type="button" class="tab-btn" role="tab" id="tab-release" aria-controls="panel-release" aria-selected="false" tabindex="-1">Verified Bundle</button>
+            <button type="button" class="tab-btn" role="tab" id="tab-offline" aria-controls="panel-offline" aria-selected="false" tabindex="-1">Offline / Air-Gapped</button>
+          </div>
+
+          <div id="panel-agy" class="tab-panel" role="tabpanel" aria-labelledby="tab-agy">
+            <div class="code-block">
+              <div class="code-header">
+                <span>Antigravity CLI (macOS, Linux, Windows)</span>
+                <button type="button" class="copy-btn" data-copy="code-agy">Copy</button>
+              </div>
+              <pre><code id="code-agy">agy plugin install https://github.com/hynko431/Coldpin-npx-Safe-Finder
 agy plugin list
 agy --agent coldpin-auditor</code></pre>
-        <button type="button" class="copy-btn" data-copy="cmd-agy">Copy</button>
-      </div>
-      <p>Or download the SLSA-attested <code>coldpin-antigravity.zip</code> + <code>SHA256SUMS.txt</code> from <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases/tag/v1.5.0">GitHub Releases</a>, unpack it, and install the folder with <code>agy plugin install ./coldpin-antigravity</code>.</p>
+            </div>
+            <p class="prose-muted">
+              Installs enabled immediately (zero mandatory variables) with 3 skills (including <code>/coldpin-audit</code> and <code>/coldpin-incident</code>),
+              7 read-only aspect agents, 3 rules, 1 local <code>stdio</code> MCP server, and 3 fail-safe <code>PreToolUse</code> hook groups.
+            </p>
+          </div>
 
-      <h3>Standalone CLI &amp; Local <code>stdio</code> MCP Server (npm or Git)</h3>
-      <div class="code-wrap">
-        <pre><code id="cmd-npm"># Run Coldpin MCP server via npm (zero install script execution)
-npx --ignore-scripts coldpin@1.5.0 mcp
-
-# Inspect a package cold in memory
+          <div id="panel-npm" class="tab-panel" role="tabpanel" aria-labelledby="tab-npm" hidden>
+            <div class="code-block">
+              <div class="code-header">
+                <span>Standalone CLI &amp; Local MCP Server (npm)</span>
+                <button type="button" class="copy-btn" data-copy="code-npm">Copy</button>
+              </div>
+              <pre><code id="code-npm">npx --ignore-scripts coldpin@1.5.0 mcp
 npx --ignore-scripts coldpin@1.5.0 inspect semver@7.7.1
-
-# Batch-screen up to 50 direct dependencies in package.json
 npx --ignore-scripts coldpin@1.5.0 audit-batch ./package.json --limit 50</code></pre>
-        <button type="button" class="copy-btn" data-copy="cmd-npm">Copy</button>
-      </div>
-      <p>See full multi-harness instructions (Antigravity, Claude Code, Codex CLI, Official MCP Registry) in <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/docs/harnesses.md">docs/harnesses.md</a> and <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/docs/getting_started.md">docs/getting_started.md</a>.</p>
-    </section>
+            </div>
+            <p class="prose-muted">
+              Published as <a href="https://www.npmjs.com/package/coldpin">coldpin@1.5.0</a> on npm and indexed in the
+              <a href="https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.hynko431/coldpin">Official MCP Registry</a> as <code>io.github.hynko431/coldpin</code>.
+            </p>
+          </div>
 
-    <section id="antigravity">
-      <h2>Antigravity Native Plugin Architecture</h2>
-      <p>Validated cleanly with <code>agy plugin validate --strict</code> (<code>findings: []</code>): <strong>3 skills, 7 read-only agents, 3 rules, 1 local MCP server, and 3 lifecycle hook groups</strong>.</p>
-      <div class="grid">
-        <div class="card">
-          <h3>Skills <span class="badge">3</span></h3>
-          <ul>
-            <li><code>skills/coldpin/</code> — Canonical cross-harness skill + 5 modular aspect playbooks under <code>references/aspect-*.md</code>.</li>
-            <li><code>/coldpin-audit</code> — Antigravity slash workflow for cold package vetting, manifest triage, and confusion audits.</li>
-            <li><code>/coldpin-incident</code> — Antigravity slash workflow for patient-zero bisect, rollback anchor recovery, and regulatory notification windows.</li>
-          </ul>
-        </div>
-        <div class="card">
-          <h3>Read-Only Aspect Agents <span class="badge">7</span></h3>
-          <ul>
-            <li><code>coldpin-auditor</code> (<code>mainAgent: true</code>) — Primary read-only orchestrator delegating across 6 specialists.</li>
-            <li>6 isolated background subagents (<code>inheritCustomizations: false</code>, <code>commandExecutionPolicy: "off"</code>): <code>coldpin-discoverer</code>, <code>coldpin-inspector</code>, <code>coldpin-manifest-auditor</code>, <code>coldpin-confusion-auditor</code>, <code>coldpin-forensics</code>, and <code>coldpin-compliance</code>.</li>
-          </ul>
-        </div>
-        <div class="card">
-          <h3>Rules <span class="badge">3</span></h3>
-          <ul>
-            <li><code>rules/AGENTS.md</code> — Always-on policy (<code>&lt;= 1,800</code> bytes) with compact 6-aspect delegation routing table.</li>
-            <li><code>rules/coldpin-manifest-guard.md</code> — <code>trigger: glob</code> on <code>package.json</code>, lockfiles, and <code>.npmrc</code>.</li>
-            <li><code>rules/coldpin-incident-checklist.md</code> — <code>trigger: model_decision</code> for compromise triage and disclosure timers.</li>
-          </ul>
-        </div>
-        <div class="card">
-          <h3>Lifecycle Hooks <span class="badge">3</span></h3>
-          <ul>
-            <li><code>coldpin-npx-guard</code> — Blocks unvetted or obfuscated <code>npx</code>/<code>pnpx</code>/<code>bunx</code>/<code>yarn dlx</code>/<code>curl | sh</code> runs; forces user confirmation on exact-pinned Coldpin commands.</li>
-            <li><code>coldpin-config-guard</code> — Forces user confirmation on edits to <code>.npmrc</code>, <code>package.json</code>, lockfiles, and policy/hook files.</li>
-            <li><code>coldpin-delegation-guard</code> — Gates dynamic <code>define_subagent</code> calls requesting write tools. Pure ES2020 (<code>lib/hook.mjs</code>), exits <code>0</code>, never emits auto-approval.</li>
-          </ul>
-        </div>
-        <div class="card">
-          <h3>Local <code>stdio</code> MCP Server <span class="badge">1</span></h3>
-          <ul>
-            <li>Zero mandatory variables — plugin starts enabled immediately upon install.</li>
-            <li>7 read-only eager tools (<code>1,563</code> tokens total), <code>timeoutSeconds: 300</code>, isolated <code>${PLUGIN_DATA}</code> cache.</li>
-            <li>Opt-in enterprise private-registry overlay template at <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/examples/mcp_config.private-registry.example.json">examples/mcp_config.private-registry.example.json</a>.</li>
-          </ul>
-        </div>
-        <div class="card">
-          <h3>Human Approval Boundary <span class="badge">Fail-Closed</span></h3>
-          <ul>
-            <li>Coldpin never runs untrusted package install scripts or binaries.</li>
-            <li>Untrusted package prose is isolated as data with hidden/bidi Unicode and prompt-injection checks.</li>
-            <li>Every audit ends with a <code>Title + Info + Evidence</code> card listing observations, inferences, and unknowns.</li>
-          </ul>
-        </div>
-      </div>
-    </section>
+          <div id="panel-release" class="tab-panel" role="tabpanel" aria-labelledby="tab-release" hidden>
+            <div class="code-block">
+              <div class="code-header">
+                <span>SLSA-Attested Release Bundle (GitHub Releases)</span>
+                <button type="button" class="copy-btn" data-copy="code-release">Copy</button>
+              </div>
+              <pre><code id="code-release">sha256sum -c SHA256SUMS.txt
+python -m zipfile -e coldpin-antigravity.zip ./coldpin-antigravity
+agy plugin validate --strict ./coldpin-antigravity
+agy plugin install ./coldpin-antigravity</code></pre>
+            </div>
+            <p class="prose-muted">
+              Reproducible host archives for Antigravity, Claude Code, and Codex CLI ship with SHA-256 digests and GitHub SLSA build provenance on
+              <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases/tag/v1.5.0">Release v1.5.0</a>.
+            </p>
+          </div>
 
-    <section id="tools">
-      <h2>MCP Tools &amp; CLI Reference</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>MCP Tool</th>
-              <th>CLI Verb</th>
-              <th>Exit Codes</th>
-              <th>Purpose</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>discover_packages</code></td>
-              <td><code>discover</code></td>
-              <td><code>0 / 2 / 1</code></td>
-              <td>Search npm packages by query, category, org, or creator with org policy, cooldown, and 7-primitive squat screening.</td>
-            </tr>
-            <tr>
-              <td><code>inspect_package_artifact</code></td>
-              <td><code>inspect</code></td>
-              <td><code>0 / 2 / 3 / 1</code></td>
-              <td>Fetch and verify SHA-512 in memory, run linear-time JS/TS lexical taint and hidden-Unicode triage, check OSV/<code>MAL-*</code>, and verify 3-tier tarball-vs-Git parity.</td>
-            </tr>
-            <tr>
-              <td><code>resolve_safe_anchor</code></td>
-              <td><code>resolve-anchor</code></td>
-              <td><code>0 / 2 / 3 / 1</code></td>
-              <td>Walk <code>--first-parent</code> history with blob-cached SQLite scans to isolate patient-zero commit and recover a verified pre-compromise release or clean alternative.</td>
-            </tr>
-            <tr>
-              <td><code>verify_confusion</code></td>
-              <td><code>verify-confusion</code></td>
-              <td><code>0 / 3 / 1</code></td>
-              <td>Audit <code>package.json</code> and <code>.npmrc</code> for unpinned private scopes and dependency confusion risk (<code>T1195.001</code>).</td>
-            </tr>
-            <tr>
-              <td><code>audit_manifest_batch</code></td>
-              <td><code>audit-batch</code></td>
-              <td><code>0 / 2 / 3 / 1</code></td>
-              <td>Batch-screen up to 50 direct dependencies in <code>package.json</code> with private-scope isolation and compact <code>&lt;= 500</code>-token MCP summaries.</td>
-            </tr>
-            <tr>
-              <td><code>audit_verify</code></td>
-              <td><code>audit-verify</code></td>
-              <td><code>0 / 3 / 1</code></td>
-              <td>Verify sequence numbers and SHA-256 hash chain integrity of local <code>audit.jsonl</code> logs.</td>
-            </tr>
-            <tr>
-              <td><code>get_artifact_report</code></td>
-              <td><code>mcp</code></td>
-              <td><code>0 / 1</code></td>
-              <td>Page full session-scoped inspection/batch reports from bounded in-memory LRU without persisting verdicts to SQLite.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+          <div id="panel-offline" class="tab-panel" role="tabpanel" aria-labelledby="tab-offline" hidden>
+            <div class="code-block">
+              <div class="code-header">
+                <span>Air-Gapped Offline Tarball Inspection</span>
+                <button type="button" class="copy-btn" data-copy="code-offline">Copy</button>
+              </div>
+              <pre><code id="code-offline">COLDPIN_OFFLINE=1 node --no-warnings lib/cli.mjs inspect \
+  --tarball ./vendor/pkg.tgz \
+  --git-dir ./vendor/repo \
+  --offline --sarif --audit-log ./audit.jsonl</code></pre>
+            </div>
+            <p class="prose-muted">
+              Performs zero outbound HTTP requests, blocks remote <code>git clone</code>, and fails closed as <code>UNVERIFIABLE_UNKNOWN</code> when live OSV intelligence is absent.
+            </p>
+          </div>
+        </section>
 
-    <section id="security">
-      <h2>Security, Privacy &amp; Enterprise Configuration</h2>
-      <div class="notice">
-        <strong>Zero Telemetry &amp; Local-Only Execution:</strong> Coldpin operates no hosted backend, analytics collector, or external database. Offline mode (<code>--offline</code> or <code>COLDPIN_OFFLINE=1</code>) performs zero outbound network calls and fails closed.
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Environment Variable</th>
-              <th>Required</th>
-              <th>Description</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>COLDPIN_POLICY_PATH</code></td>
-              <td>No</td>
-              <td>Path to operator-pinned immutable <code>.coldpin.policy.json</code>.</td>
-            </tr>
-            <tr>
-              <td><code>COLDPIN_ALLOWED_ROOTS</code></td>
-              <td>No</td>
-              <td>OS-delimited workspace root allowlist for local file/tarball/Git access.</td>
-            </tr>
-            <tr>
-              <td><code>COLDPIN_AUDIT_LOG</code></td>
-              <td>No</td>
-              <td>Path to optional append-only hash-chained <code>audit.jsonl</code>.</td>
-            </tr>
-            <tr>
-              <td><code>COLDPIN_OFFLINE</code></td>
-              <td>No</td>
-              <td>Set to <code>1</code> to enforce offline fail-closed execution (blocks all outbound requests and remote clones).</td>
-            </tr>
-            <tr>
-              <td><code>COLDPIN_PRIVATE_SCOPES</code></td>
-              <td>No</td>
-              <td>Comma-separated internal <code>@scope</code> list routed exclusively to the private registry (never sent to public npm or OSV).</td>
-            </tr>
-            <tr>
-              <td><code>COLDPIN_PRIVATE_REGISTRY_URL</code></td>
-              <td>No</td>
-              <td>HTTPS-only private registry URL for <code>COLDPIN_PRIVATE_SCOPES</code> (SSRF IP-blocked).</td>
-            </tr>
-            <tr>
-              <td><code>COLDPIN_REGISTRY_TOKEN</code></td>
-              <td>No (Secret)</td>
-              <td>Optional read-only bearer token sent strictly over HTTPS to the exact matching private host. Unexpanded <code>${VAR}</code> placeholders are rejected.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p style="margin-top: 0.9rem;">
-        Full documentation:
-        <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/docs/privacy.md">Data Handling &amp; Privacy</a> ·
-        <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/SECURITY.md">Security Policy</a> ·
-        <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/docs/faq.md">FAQ</a> ·
-        <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/skills/coldpin/references/enterprise-policy-schema.md">Enterprise Policy Schema</a>
-      </p>
-    </section>
+        <section id="simulator" class="doc-section" data-group="Interactive Lab" data-search="simulator hook guard test pretooluse deny force_ask allow verdict evidence card">
+          <h2 class="doc-h2">Interactive Policy Lab</h2>
+          <p class="prose">
+            Test Coldpin's <code>PreToolUse</code> hook evaluator (<code>lib/hook.mjs</code>) and inspect its 4-state
+            <code>Title + Info + Evidence</code> output cards directly in your browser. Everything runs locally with zero network requests.
+          </p>
 
-    <section id="verification">
-      <h2>Verification &amp; Supply-Chain Provenance</h2>
-      <div class="grid">
-        <div class="card">
-          <h3>Automated CI &amp; Benchmarks</h3>
-          <ul>
-            <li>4-cell GitHub Actions matrix (<code>ubuntu-latest</code> &amp; <code>windows-latest</code> × Node <code>24</code> &amp; <code>26</code>).</li>
-            <li><code>39/39</code> deterministic unit, quarantine, taint, MCP, and hook tests.</li>
-            <li><code>49</code>-fixture corpus (<code>100.0%</code> recall, <code>0.0%</code> FPR) + <code>35/35</code> security mutations (<a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/skills/coldpin/BENCHMARK.md">BENCHMARK.md</a>).</li>
-          </ul>
-        </div>
-        <div class="card">
-          <h3>Attestations &amp; Checksums</h3>
-          <ul>
-            <li>GitHub SLSA Build Provenance attestations for every release archive and SARIF report.</li>
-            <li>Dual in-toto DSSE manifests: <code>skills/coldpin/skill.oms.sig</code> (18 files) and <code>catalog/plugin.oms.sig</code> (40 files).</li>
-            <li>SkillSpector self-audit (<code>SS-03</code>–<code>SS-15</code>): <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/docs/verification/skill-inspector-self-audit.md">APPROVE (12/100, 0 blocking)</a>.</li>
-          </ul>
-        </div>
-      </div>
-    </section>
-  </main>
+          <div class="tab-bar" role="tablist" aria-label="Interactive lab mode">
+            <button type="button" class="tab-btn" role="tab" id="tab-sim-hook" aria-controls="panel-sim-hook" aria-selected="true" tabindex="0">PreToolUse Hook Simulator</button>
+            <button type="button" class="tab-btn" role="tab" id="tab-sim-verdict" aria-controls="panel-sim-verdict" aria-selected="false" tabindex="-1">4-State Verdict Card</button>
+          </div>
 
-  <footer>
-    <div class="container footer-grid">
-      <div>
-        <strong>Coldpin</strong> (<code>coldpin</code> v1.5.0) · Apache-2.0 · Maintained by <a href="https://github.com/hynko431">hynko431</a>
+          <div id="panel-sim-hook" class="tab-panel" role="tabpanel" aria-labelledby="tab-sim-hook">
+            <div class="sim-shell" data-ui="coldpin-hook-simulator">
+              <div class="sim-controls">
+                <div class="sim-field">
+                  <label for="sim-tool">Intercepted Tool</label>
+                  <select id="sim-tool" class="sim-select">
+                    <option value="run_command">run_command</option>
+                    <option value="write_to_file">write_to_file</option>
+                    <option value="define_subagent">define_subagent</option>
+                    <option value="manage_task">manage_task (send_input)</option>
+                  </select>
+                </div>
+                <div class="sim-field">
+                  <label for="sim-payload">Command, File Path, or Delegation Spec</label>
+                  <input id="sim-payload" class="sim-input" type="text" value="npx -y evil-formatter" autocomplete="off" spellcheck="false">
+                </div>
+              </div>
+
+              <div class="sim-presets" aria-label="Sample hook test cases">
+                <button type="button" class="preset-btn" data-sim-tool="run_command" data-sim-payload="npx -y evil-formatter">Unvetted npx</button>
+                <button type="button" class="preset-btn" data-sim-tool="run_command" data-sim-payload='n""px evil-pkg'>Quoted evasion</button>
+                <button type="button" class="preset-btn" data-sim-tool="run_command" data-sim-payload="npx --yes --ignore-scripts --package=semver@7.7.1 -- semver --help">Pinned Coldpin run</button>
+                <button type="button" class="preset-btn" data-sim-tool="write_to_file" data-sim-payload=".npmrc">Edit .npmrc</button>
+                <button type="button" class="preset-btn" data-sim-tool="define_subagent" data-sim-payload="{ EnableWriteTools: true }">Writable subagent</button>
+                <button type="button" class="preset-btn" data-sim-tool="run_command" data-sim-payload="git status">Benign git status</button>
+              </div>
+
+              <div class="sim-result" aria-live="polite">
+                <div class="sim-result-head">
+                  <span id="sim-decision-badge" class="decision-pill decision-deny">DENY</span>
+                  <span id="sim-meta" class="sim-meta">coldpin-npx-guard | UNVETTED_OR_OBFUSCATED_RUNNER | exit 0</span>
+                </div>
+                <p id="sim-reason" class="sim-reason">Blocked unpinned, obfuscated, or non-canonical package runner. Inspect cold via Coldpin MCP before running.</p>
+                <pre id="sim-json" class="sim-json">{
+  "decision": "deny",
+  "reason": "[UNVETTED_OR_OBFUSCATED_RUNNER] Blocked unpinned, obfuscated, or non-canonical package runner."
+}</pre>
+              </div>
+            </div>
+          </div>
+
+          <div id="panel-sim-verdict" class="tab-panel" role="tabpanel" aria-labelledby="tab-sim-verdict" hidden>
+            <div class="sim-shell" data-ui="coldpin-verdict-explorer">
+              <div class="sim-presets" aria-label="Select verdict state">
+                <button type="button" class="preset-btn" data-verdict="clean">Clean (exit 0)</button>
+                <button type="button" class="preset-btn" data-verdict="suspicious">Suspicious (exit 2)</button>
+                <button type="button" class="preset-btn" data-verdict="malicious">Malicious (exit 3)</button>
+                <button type="button" class="preset-btn" data-verdict="unknown">Unknown / Binary (exit 2)</button>
+              </div>
+
+              <div class="verdict-card" aria-live="polite">
+                <div class="verdict-card-title">
+                  <h4 id="vc-title">semver@7.7.1</h4>
+                  <span id="vc-badge" class="decision-pill decision-allow">VERIFIED_CLEAN_WITHIN_SCOPE (exit 0)</span>
+                </div>
+                <dl class="verdict-kv">
+                  <div>
+                    <dt>Archive &amp; Integrity</dt>
+                    <dd id="vc-sha">sha512-verified (in-memory stream, 14 files, 0 lifecycle hooks)</dd>
+                  </div>
+                  <div>
+                    <dt>Tarball-vs-Git Parity</dt>
+                    <dd id="vc-parity">Tier 1 + Tier 2 verified (Git tag matches tarball files)</dd>
+                  </div>
+                  <div>
+                    <dt>Observed Findings</dt>
+                    <dd id="vc-findings">0 malicious indicators, 0 OSV/MAL-* advisories, 0 hidden Unicode or taint chains</dd>
+                  </div>
+                  <div>
+                    <dt>Explicit Unknowns</dt>
+                    <dd id="vc-unknowns">Runtime behavior of floating transitive dependencies is outside static tarball scope.</dd>
+                  </div>
+                </dl>
+                <pre id="vc-cmd" class="sim-json">npx --yes --ignore-scripts --package=semver@7.7.1 -- semver --help</pre>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="antigravity-plugin" class="doc-section" data-group="Antigravity Plugin" data-search="antigravity plugin.json mcp_config.json vertical slice validation strict skills agents rules hooks">
+          <h2 class="doc-h2">Antigravity 5-Component Architecture</h2>
+          <p class="prose">
+            Coldpin aligns strictly to the official Antigravity plugin manifest schema (<code>https://antigravity.google/schemas/v1/plugin.json</code>).
+            Scanner rule data lives cleanly in <code>catalog/</code> so <code>rules/</code> holds only agent Markdown rules.
+          </p>
+
+          <div class="component-ledger">
+            <div class="ledger-row">
+              <div class="ledger-term">Skills<span class="ledger-count">3 bundled</span></div>
+              <div class="ledger-body">
+                <p><code>skills/coldpin/</code> is the canonical cross-harness skill with 5 modular playbooks under <code>references/aspect-*.md</code>.</p>
+                <p>Two Antigravity slash commands (<code>/coldpin-audit</code> and <code>/coldpin-incident</code>) provide guided audit and compromise recovery workflows.</p>
+              </div>
+            </div>
+            <div class="ledger-row">
+              <div class="ledger-term">Read-Only Agents<span class="ledger-count">7 bundled</span></div>
+              <div class="ledger-body">
+                <p>Primary orchestrator <code>coldpin-auditor</code> (<code>mainAgent: true</code>) delegates across 6 isolated background specialists.</p>
+                <p>All 7 agents enforce <code>commandExecutionPolicy: "off"</code> and canonical <code>view_file</code> allowlists; all 6 background subagents set <code>inheritCustomizations: false</code> to prevent workspace rule poisoning.</p>
+              </div>
+            </div>
+            <div class="ledger-row">
+              <div class="ledger-term">Markdown Rules<span class="ledger-count">3 bundled</span></div>
+              <div class="ledger-body">
+                <p><code>rules/AGENTS.md</code> stays under 1,800 bytes (1,599 bytes measured) with a compact 6-aspect delegation routing table.</p>
+                <p><code>rules/coldpin-manifest-guard.md</code> activates via <code>trigger: glob</code> on manifests and lockfiles; <code>rules/coldpin-incident-checklist.md</code> activates via <code>trigger: model_decision</code>.</p>
+              </div>
+            </div>
+            <div class="ledger-row">
+              <div class="ledger-term">Lifecycle Hooks<span class="ledger-count">3 enabled groups</span></div>
+              <div class="ledger-body">
+                <p>Root <code>hooks.json</code> executes pure ES2020 <code>lib/hook.mjs</code> across <code>coldpin-npx-guard</code>, <code>coldpin-config-guard</code>, and <code>coldpin-delegation-guard</code>.</p>
+                <p>Always exits <code>0</code> with strictly <code>allow</code>, <code>deny</code>, or <code>force_ask</code>. Never emits auto-approval.</p>
+              </div>
+            </div>
+            <div class="ledger-row">
+              <div class="ledger-term">Local MCP Server<span class="ledger-count">1 stdio server</span></div>
+              <div class="ledger-body">
+                <p>Root <code>mcp_config.json</code> runs <code>node --no-warnings ${PLUGIN_ROOT}/lib/mcp.mjs</code> with <code>timeoutSeconds: 300</code>, <code>${PLUGIN_DATA}</code> cache isolation, and all 7 read-only tools marked <code>eager: true</code> (1,563 tokens).</p>
+                <p>Zero mandatory <code>variables</code> keeps public installs enabled on first click. Enterprise private registries can apply <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/examples/mcp_config.private-registry.example.json">examples/mcp_config.private-registry.example.json</a>.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span>Measured Output: agy plugin validate . --strict --json</span>
+              <button type="button" class="copy-btn" data-copy="code-validate">Copy</button>
+            </div>
+            <pre><code id="code-validate">{
+  "manifest": "plugin.json",
+  "name": "coldpin",
+  "components": { "agents": 7, "hooks": 3, "mcpServers": 1, "rules": 3, "sidecars": 0, "skills": 3 },
+  "findings": []
+}</code></pre>
+          </div>
+        </section>
+
+        <section id="agents-and-hooks" class="doc-section" data-group="Antigravity Plugin" data-search="coldpin-auditor discoverer inspector manifest-auditor confusion-auditor forensics compliance define_subagent">
+          <h2 class="doc-h2">7 Aspect Agents &amp; 3 Guardrail Hooks</h2>
+          <p class="prose">
+            Each security aspect runs in an isolated read-only subagent with private body rules and a scoped MCP tool allowlist.
+          </p>
+
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Agent</th>
+                  <th scope="col">Role &amp; Mode</th>
+                  <th scope="col">Scoped Coldpin Tools</th>
+                  <th scope="col">Isolation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>coldpin-auditor</code></td>
+                  <td>Primary orchestrator (<code>mainAgent: true</code>)</td>
+                  <td>Delegates via <code>invoke_subagent</code> + all 7 read-only MCP tools</td>
+                  <td><code>commandExecutionPolicy: "off"</code></td>
+                </tr>
+                <tr>
+                  <td><code>coldpin-discoverer</code></td>
+                  <td>Capability search &amp; squat screening</td>
+                  <td><code>discover_packages</code></td>
+                  <td><code>inheritCustomizations: false</code></td>
+                </tr>
+                <tr>
+                  <td><code>coldpin-inspector</code></td>
+                  <td>In-memory tarball triage &amp; taint</td>
+                  <td><code>inspect_package_artifact</code>, <code>get_artifact_report</code></td>
+                  <td><code>inheritCustomizations: false</code></td>
+                </tr>
+                <tr>
+                  <td><code>coldpin-manifest-auditor</code></td>
+                  <td>Batch screening of <code>package.json</code> (up to 50 deps)</td>
+                  <td><code>audit_manifest_batch</code>, <code>get_artifact_report</code></td>
+                  <td><code>inheritCustomizations: false</code></td>
+                </tr>
+                <tr>
+                  <td><code>coldpin-confusion-auditor</code></td>
+                  <td>Private-scope &amp; <code>.npmrc</code> confusion audit (<code>T1195.001</code>)</td>
+                  <td><code>verify_confusion</code></td>
+                  <td><code>inheritCustomizations: false</code></td>
+                </tr>
+                <tr>
+                  <td><code>coldpin-forensics</code></td>
+                  <td>Patient-zero commit bisect &amp; REA triage handoff</td>
+                  <td><code>resolve_safe_anchor</code>, <code>inspect_package_artifact</code></td>
+                  <td><code>inheritCustomizations: false</code></td>
+                </tr>
+                <tr>
+                  <td><code>coldpin-compliance</code></td>
+                  <td>Audit log chain verification &amp; disclosure clocks</td>
+                  <td><code>audit_verify</code>, <code>get_artifact_report</code></td>
+                  <td><code>inheritCustomizations: false</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="mcp-and-cli" class="doc-section" data-group="Reference" data-search="discover_packages inspect_package_artifact resolve_safe_anchor verify_confusion audit_manifest_batch audit_verify get_artifact_report cli verbs exit codes">
+          <h2 class="doc-h2">7 MCP Tools &amp; 6 CLI Verbs</h2>
+          <p class="prose">
+            Both the CLI (<code>lib/cli.mjs</code>) and local <code>stdio</code> MCP server (<code>lib/mcp.mjs</code>) execute the same pure async workflows.
+            Exit codes remain deterministic across terminals and CI pipelines: <code>0</code> clean within scope, <code>2</code> suspicious or unknown, <code>3</code> malicious indicators found, and <code>1</code> invalid usage or error.
+          </p>
+
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">MCP Tool</th>
+                  <th scope="col" class="nowrap">CLI Verb</th>
+                  <th scope="col" class="nowrap">Exit Codes</th>
+                  <th scope="col">Capability</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="nowrap"><code>discover_packages</code></td>
+                  <td class="nowrap"><code>discover</code></td>
+                  <td class="nowrap"><code>0 / 2 / 1</code></td>
+                  <td>Search npm by capability, category, org, or creator with org allow/deny policy, release cooldown, and 7-primitive typosquat/slopsquat filters.</td>
+                </tr>
+                <tr>
+                  <td class="nowrap"><code>inspect_package_artifact</code></td>
+                  <td class="nowrap"><code>inspect</code></td>
+                  <td class="nowrap"><code>0 / 2 / 3 / 1</code></td>
+                  <td>Stream tarball over HTTPS (or local <code>.tgz</code>), verify SHA-512, unpack strictly in memory, run linear-time JS/TS taint and hidden-Unicode triage, check OSV/<code>MAL-*</code>, and verify 3-tier tarball-to-Git parity.</td>
+                </tr>
+                <tr>
+                  <td class="nowrap"><code>resolve_safe_anchor</code></td>
+                  <td class="nowrap"><code>resolve-anchor</code></td>
+                  <td class="nowrap"><code>0 / 2 / 3 / 1</code></td>
+                  <td>Walk <code>--first-parent</code> history with blob-cached SQLite scans to isolate patient-zero commit, evaluate residual CVEs/KEV, and emit <code>ROLLBACK_TO_SAFE_ANCHOR</code> only when a verified npm tarball exists.</td>
+                </tr>
+                <tr>
+                  <td class="nowrap"><code>verify_confusion</code></td>
+                  <td class="nowrap"><code>verify-confusion</code></td>
+                  <td class="nowrap"><code>0 / 3 / 1</code></td>
+                  <td>Inspect workspace <code>package.json</code> and <code>.npmrc</code> for unpinned private scopes and claimable internal names (<code>T1195.001</code>).</td>
+                </tr>
+                <tr>
+                  <td class="nowrap"><code>audit_manifest_batch</code></td>
+                  <td class="nowrap"><code>audit-batch</code></td>
+                  <td class="nowrap"><code>0 / 2 / 3 / 1</code></td>
+                  <td>Screen up to 50 direct dependencies in <code>package.json</code> with private-scope OSV non-leakage and compact <code>&lt;= 500</code>-token MCP summaries.</td>
+                </tr>
+                <tr>
+                  <td class="nowrap"><code>audit_verify</code></td>
+                  <td class="nowrap"><code>audit-verify</code></td>
+                  <td class="nowrap"><code>0 / 3 / 1</code></td>
+                  <td>Verify sequence numbers, extra-field tamper protection, and SHA-256 hash chain integrity of local <code>audit.jsonl</code> logs.</td>
+                </tr>
+                <tr>
+                  <td class="nowrap"><code>get_artifact_report</code></td>
+                  <td class="nowrap"><code>mcp</code></td>
+                  <td class="nowrap"><code>0 / 1</code></td>
+                  <td>Page full inspection or batch reports from the bounded in-memory LRU cache (25 entries, 30-minute TTL, 15 MiB cap; never persisted to SQLite).</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="harnesses" class="doc-section" data-group="Reference" data-search="harnesses antigravity claude code codex cursor mcp registry distribution packages">
+          <h2 class="doc-h2">Harnesses &amp; Multi-Host Distribution</h2>
+          <p class="prose">
+            One canonical skill source (<code>skills/coldpin/</code>) and one zero-dependency ESM build (<code>lib/</code>) target every harness without forked prose.
+            <code>scripts/pack_plugin.py</code> produces deterministic, checksum-verified archives with explicit POSIX <code>0755</code> modes on entrypoints.
+          </p>
+
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Harness / Channel</th>
+                  <th scope="col">Manifest / Identifier</th>
+                  <th scope="col">Entrypoint</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Antigravity App, CLI &amp; IDEs</td>
+                  <td><code>plugin.json</code>, <code>mcp_config.json</code>, <code>hooks.json</code></td>
+                  <td><code>agy plugin install https://github.com/hynko431/Coldpin-npx-Safe-Finder</code></td>
+                </tr>
+                <tr>
+                  <td>Official MCP Registry</td>
+                  <td><code>io.github.hynko431/coldpin</code> (<code>server.json</code>)</td>
+                  <td><code>npx --ignore-scripts coldpin@1.5.0 mcp</code></td>
+                </tr>
+                <tr>
+                  <td>npm &amp; Standalone CLI</td>
+                  <td><code>coldpin@1.5.0</code> (<code>package.json</code>)</td>
+                  <td><code>coldpin</code> / <code>coldpin-mcp</code></td>
+                </tr>
+                <tr>
+                  <td>Claude Code</td>
+                  <td><code>.claude-plugin/plugin.json</code> (inline <code>mcpServers</code>)</td>
+                  <td><code>coldpin-claude.zip</code></td>
+                </tr>
+                <tr>
+                  <td>Codex CLI / ChatGPT</td>
+                  <td><code>.codex-plugin/plugin.json</code></td>
+                  <td><code>coldpin-openai.zip</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="prose-muted">
+            Full harness packaging details: <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/docs/harnesses.md">docs/harnesses.md</a>.
+          </p>
+        </section>
+
+        <section id="configuration" class="doc-section" data-group="Enterprise & Security" data-search="environment variables policy private registry scopes token privacy non-leakage offline dpdp cert-in cra nis2 gdpr">
+          <h2 class="doc-h2">Enterprise Configuration &amp; Data Handling</h2>
+          <div class="callout">
+            <strong>Zero Telemetry &amp; Private-Scope Isolation:</strong> Coldpin runs no hosted backend, analytics collector, or external database.
+            Any scope listed in <code>COLDPIN_PRIVATE_SCOPES</code>, <code>.coldpin.policy.json</code>, or <code>$HOME/.npmrc</code> never contacts public <code>registry.npmjs.org</code> or <code>api.osv.dev</code>,
+            and 1-edit typos of private scopes are hard-blocked before any network call.
+          </div>
+
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Environment Variable</th>
+                  <th scope="col">Required</th>
+                  <th scope="col">Behavior &amp; Guardrails</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>COLDPIN_POLICY_PATH</code></td>
+                  <td>No</td>
+                  <td>Operator-pinned immutable <code>.coldpin.policy.json</code> (overrides workspace policy and env scope defaults).</td>
+                </tr>
+                <tr>
+                  <td><code>COLDPIN_ALLOWED_ROOTS</code></td>
+                  <td>No</td>
+                  <td>OS-delimited local workspace root allowlist for local tarball, lockfile, and Git directory reads.</td>
+                </tr>
+                <tr>
+                  <td><code>COLDPIN_AUDIT_LOG</code></td>
+                  <td>No</td>
+                  <td>Path to optional append-only hash-chained <code>audit.jsonl</code> using pseudonymous SHA-256 <code>actor_id_hash</code>.</td>
+                </tr>
+                <tr>
+                  <td><code>COLDPIN_OFFLINE</code></td>
+                  <td>No</td>
+                  <td>Set to <code>1</code> to forbid all outbound network traffic and remote Git clones (fails closed).</td>
+                </tr>
+                <tr>
+                  <td><code>COLDPIN_PRIVATE_SCOPES</code></td>
+                  <td>No</td>
+                  <td>Comma-separated internal <code>@scope</code> list routed exclusively to <code>COLDPIN_PRIVATE_REGISTRY_URL</code>.</td>
+                </tr>
+                <tr>
+                  <td><code>COLDPIN_PRIVATE_REGISTRY_URL</code></td>
+                  <td>No</td>
+                  <td>HTTPS-only private registry origin validated against SSRF loopback, link-local, IMDS, and RFC 1918 IP ranges.</td>
+                </tr>
+                <tr>
+                  <td><code>COLDPIN_REGISTRY_TOKEN</code></td>
+                  <td>No (Secret)</td>
+                  <td>Read-only bearer token sent strictly over HTTPS to the exact matching private host. Unexpanded <code>${VAR}</code> placeholders are rejected and tokens are never logged.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3 class="doc-h3">Compliance &amp; Incident Reference</h3>
+          <p class="prose">
+            <code>rules/coldpin-incident-checklist.md</code> and <code>/coldpin-incident</code> surface standard regulatory notification clocks
+            when malicious indicators are confirmed: India CERT-In (6 hours) and DPDP Act/Rules, EU CRA and NIS2 (24-hour early warning, 72-hour notification),
+            GDPR Art. 33 (72 hours), and NIST SSDF / SOC 2 evidence trails. Read full disclosures in
+            <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/docs/privacy.md">docs/privacy.md</a> and
+            <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/SECURITY.md">SECURITY.md</a>.
+          </p>
+        </section>
+
+        <section id="verification" class="doc-section" data-group="Enterprise & Security" data-search="verification slsa provenance sha256sums checksums dsse skillspector benchmark tests ci">
+          <h2 class="doc-h2">Verification &amp; Supply-Chain Provenance</h2>
+          <p class="prose">
+            Every release runs a 14-gate pipeline across <code>ubuntu-latest</code> and <code>windows-latest</code> on Node <code>24</code> and Node <code>26</code>:
+            <code>39/39</code> deterministic tests, <code>49</code>-fixture corpus (<code>100.0%</code> recall, <code>0.0%</code> FPR), <code>35/35</code> mutation proofs,
+            SkillSpector self-audit (<code>SS-03</code> through <code>SS-15</code>: <code>APPROVE</code>, risk <code>12/100</code>, <code>0</code> blocking),
+            dual in-toto DSSE signatures (<code>skills/coldpin/skill.oms.sig</code> across 18 files and <code>catalog/plugin.oms.sig</code> across 40 files),
+            and GitHub SLSA Build Provenance attestations (<a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/attestations/70574450">v1.5.0 attestation</a>).
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span>Release v1.5.0 Verified SHA256SUMS.txt</span>
+              <button type="button" class="copy-btn" data-copy="code-sha">Copy</button>
+            </div>
+            <pre><code id="code-sha">42842caa005d5135d0022f9b6604260fb263bd4c36016eb27de6b8bf41a72c9b  coldpin-antigravity.zip
+1ff5a1d7465f2fad5199a4424b087a77127ca4ef0f98b26df4b1722361e39ba8  coldpin-claude.zip
+b3d29cfbe747ff114b4a107bf562fe70ed39db7a7385762567eff5dcebbfb5e6  coldpin-openai.zip
+72be3a03376ca16c6dc53937f2f92bbe6bc1647a7a6e60c091422e3687b731a  skillspector-self-audit.sarif</code></pre>
+          </div>
+
+          <p class="prose-muted">
+            Full evidence reports:
+            <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/skills/coldpin/BENCHMARK.md">BENCHMARK.md</a>,
+            <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/docs/verification/skill-inspector-self-audit.md">SkillSpector Self-Audit</a>,
+            and <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/TESTING.md">TESTING.md</a>.
+          </p>
+        </section>
+
+        <section id="faq" class="doc-section" data-group="Support" data-search="faq alternatives clean_within_scope sha512 transitive caveat forensic_commit_only rea tier 3 support">
+          <h2 class="doc-h2">FAQ &amp; Epistemic Limits</h2>
+          <div class="faq-list">
+            <details class="faq-item" open>
+              <summary>Does VERIFIED_CLEAN_WITHIN_SCOPE prove a package has zero malware?</summary>
+              <div class="faq-answer">
+                No. Static analysis cannot prove absence of malware on dynamically fetched remote payloads, time-bombed triggers, or uninspected compiled binaries.
+                <code>VERIFIED_CLEAN_WITHIN_SCOPE</code> means only that no malicious, suspicious, policy-violating, or uninspected-binary indicators were observed within the stated static inspection boundary.
+              </div>
+            </details>
+
+            <details class="faq-item">
+              <summary>Why does the recommended npx command include a SHA-512 and transitive caveat?</summary>
+              <div class="faq-answer">
+                Stock <code>npx</code> (<code>npm exec</code>) has no <code>--integrity</code> CLI flag and ignores lockfiles inside published packages, resolving floating transitive ranges live at runtime.
+                Coldpin states that boundary honestly instead of implying a bare <code>npx</code> command enforces full transitive locks. Combine exact version pins and <code>--ignore-scripts</code> with a private caching proxy for regulated builds.
+              </div>
+            </details>
+
+            <details class="faq-item">
+              <summary>Why does resolve-anchor emit FORENSIC_COMMIT_ONLY when no npm tarball matches?</summary>
+              <div class="faq-answer">
+                Running <code>npx github:org/repo#sha</code> executes <code>prepare</code> and <code>postinstall</code> build scripts locally and pulls floating dependencies.
+                When a verified clean commit has no matching published npm tarball, Coldpin suppresses runnable commands and recommends either building in an isolated sandbox or switching to a vetted category alternative (<code>SWITCH_TO_ALTERNATIVE</code>).
+              </div>
+            </details>
+
+            <details class="faq-item">
+              <summary>Do I need REA (rea-agents) installed to use Coldpin?</summary>
+              <div class="faq-answer">
+                No. Discovery, in-memory archive quarantine, JS/TS lexical taint analysis, hidden-Unicode detection, 3-tier tarball parity, and Git commit bisection run on pure Node.js 24 with zero external packages.
+                When a tarball contains obfuscated bundles or compiled <code>.node</code>, WASM, ELF, PE, or Mach-O binaries, Coldpin fails closed and points to a pre-registered REA server without ever running <code>npx -y rea-agents</code>.
+              </div>
+            </details>
+
+            <details class="faq-item">
+              <summary>Are there alternatives, and where do I get support?</summary>
+              <div class="faq-answer">
+                Yes: Socket.dev, Snyk, GuardDog, OSV-Scanner, and private registries (Verdaccio, Artifactory) cover overlapping areas. Coldpin focuses on the local, zero-dependency, agentic pre-<code>npx</code> workflow.
+                Report bugs or detection gaps publicly at <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/issues">GitHub Issues</a>; report security vulnerabilities via <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/SECURITY.md">SECURITY.md</a>.
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <footer class="site-footer">
+          <div class="footer-panel">
+            <div class="footer-top">
+              <div>
+                <strong>Coldpin</strong> (<code>coldpin</code> v1.5.0) · Apache-2.0 · Maintained by <a href="https://github.com/hynko431">hynko431</a>
+              </div>
+              <div class="footer-links">
+                <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder">Repository</a>
+                <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases/tag/v1.5.0">Release v1.5.0</a>
+                <a href="https://www.npmjs.com/package/coldpin">npm</a>
+                <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/issues">Support</a>
+                <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/CHANGELOG.md">Changelog</a>
+                <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/ACCESSIBILITY.md">Accessibility</a>
+              </div>
+            </div>
+            <p class="footer-disclaimer">
+              Static triage does not replace runtime isolation or human judgment. Engineering guidance, not legal, medical, or financial advice; confirm decisions with qualified counsel.
+            </p>
+          </div>
+        </footer>
+      </article>
+    </main>
+
+    <aside class="toc-aside" aria-label="On this page">
+      <p class="toc-title">On this page</p>
+      <ul class="toc-list">
+        <li><a class="toc-link is-active" href="#introduction">Introduction</a></li>
+        <li><a class="toc-link" href="#quickstart">Quickstart Install</a></li>
+        <li><a class="toc-link" href="#simulator">Interactive Policy Lab</a></li>
+        <li><a class="toc-link" href="#antigravity-plugin">5-Component Architecture</a></li>
+        <li><a class="toc-link" href="#agents-and-hooks">7 Agents &amp; 3 Hooks</a></li>
+        <li><a class="toc-link" href="#mcp-and-cli">7 MCP Tools &amp; 6 CLI Verbs</a></li>
+        <li><a class="toc-link" href="#harnesses">Harnesses &amp; Distribution</a></li>
+        <li><a class="toc-link" href="#configuration">Configuration &amp; Privacy</a></li>
+        <li><a class="toc-link" href="#verification">Verification &amp; Provenance</a></li>
+        <li><a class="toc-link" href="#faq">FAQ &amp; Epistemic Limits</a></li>
+      </ul>
+
+      <div class="toc-meta">
+        <p class="toc-meta-title">Published Channels</p>
+        <ul>
+          <li><a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases/tag/v1.5.0">GitHub Release v1.5.0</a></li>
+          <li><a href="https://www.npmjs.com/package/coldpin">npm: coldpin@1.5.0</a></li>
+          <li><a href="https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.hynko431/coldpin">Official MCP Registry</a></li>
+          <li><a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/issues">Public Support Tracker</a></li>
+        </ul>
       </div>
-      <div class="footer-links">
-        <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder">Repository</a>
-        <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases">Releases</a>
-        <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/issues">Support</a>
-        <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/CHANGELOG.md">Changelog</a>
-        <a href="https://github.com/hynko431/Coldpin-npx-Safe-Finder/blob/main/ACCESSIBILITY.md">Accessibility</a>
-      </div>
+    </aside>
+  </div>
+
+  <dialog id="search-dialog" class="search-dialog" aria-labelledby="search-dialog-label">
+    <div class="search-dialog-head">
+      <label id="search-dialog-label" for="search-input" class="sr-only">Search Coldpin documentation</label>
+      <input id="search-input" class="search-dialog-input" type="search" placeholder="Filter sections, MCP tools, hooks, env vars..." autocomplete="off">
+      <button type="button" class="icon-btn" id="search-close" aria-label="Close search">Esc</button>
     </div>
-    <div class="container" style="margin-top: 0.75rem; font-size: 0.8rem;">
-      Static triage does not replace runtime isolation or human judgment. Engineering guidance, not legal, medical, or financial advice.
-    </div>
-  </footer>
-
-  <script>
-    (function () {
-      var root = document.documentElement;
-      var btn = document.getElementById("theme-toggle");
-      var saved = null;
-      try { saved = localStorage.getItem("coldpin-theme"); } catch (e) {}
-      if (saved === "light" || saved === "dark") {
-        root.setAttribute("data-theme", saved);
-      }
-      if (btn) {
-        btn.addEventListener("click", function () {
-          var current = root.getAttribute("data-theme");
-          var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-          var next = current ? (current === "dark" ? "light" : "dark") : (prefersDark ? "light" : "dark");
-          root.setAttribute("data-theme", next);
-          try { localStorage.setItem("coldpin-theme", next); } catch (e) {}
-        });
-      }
-      var copyButtons = document.querySelectorAll(".copy-btn");
-      for (var i = 0; i < copyButtons.length; i++) {
-        copyButtons[i].addEventListener("click", function (ev) {
-          var targetId = ev.currentTarget.getAttribute("data-copy");
-          var el = targetId ? document.getElementById(targetId) : null;
-          if (!el || !navigator.clipboard) return;
-          var selfBtn = ev.currentTarget;
-          navigator.clipboard.writeText(el.textContent || "").then(function () {
-            selfBtn.textContent = "Copied";
-            setTimeout(function () { selfBtn.textContent = "Copy"; }, 1600);
-          });
-        });
-      }
-    })();
-  </script>
+    <ul id="search-results" class="search-results"></ul>
+  </dialog>
 </body>
 </html>
