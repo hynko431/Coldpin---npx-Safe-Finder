@@ -2,6 +2,14 @@
 
 All notable changes to `coldpin` (Coldpin; originally drafted under working title `npx-safe-finder`) are documented here following [Keep a Changelog](https://keepachangelog.com/) and Semantic Versioning.
 
+## [1.5.1] - 2026-11-22
+
+### Added
+- **Standalone Documentation Portal (`site/` + `.github/workflows/pages.yml`):** Added a zero-dependency, 3-column static documentation portal deployed on Cloudflare Pages (`https://coldpin-docs.pages.dev/`) and GitHub Pages (`https://hynko431.github.io/Coldpin-npx-Safe-Finder/`) featuring a three-layer CSS design token system, strict zero-`'unsafe-inline'` CSP + edge HTTP security headers (`site/_headers` enforcing `frame-ancestors 'none'`, `connect-src 'none'`, HSTS, `X-Content-Type-Options: nosniff`, COOP/CORP, and Permissions-Policy), instant `Ctrl+K` / `/` keyboard search, an interactive `PreToolUse` Hook Policy Simulator, and a 4-state `Title + Info + Evidence` Verdict Card Explorer.
+
+### Fixed
+- **Keyless npm OIDC Trusted Publishing & Release Automation (`.github/workflows/release.yml`):** Pinned verified commit SHAs for `actions/download-artifact` (`v4.3.0`) and `actions/attest-build-provenance` (`v4.2.2`), passed `--repo "$GH_REPO"` and idempotency checks to `gh release create`, removed the `actions/setup-node` `registry-url` placeholder token that conflicted with keyless npm OIDC Trusted Publishing, and bound `publish-npm` to the protected `npm-publish` GitHub Environment for end-to-end Sigstore provenance publishing.
+
 ## [1.5.0] - 2026-11-21
 
 ### Added

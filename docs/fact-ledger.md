@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-11-21
-review_by: 2027-02-21
+last_reviewed: 2026-11-22
+review_by: 2027-02-22
 status: current
 owner_lens: fact-ledger
 sources: see rows
@@ -29,7 +29,8 @@ Rule: every volatile regulatory date, standard revision, and external security t
 | 10 | Model Context Protocol (`2025-11-25`, `2025-06-18`, `2025-03-26`), Official MCP Registry `server.json` (`2025-12-11` schema, `description <= 100` chars, `package.json` `mcpName` verification), & OWASP MCP Top 10:2025 (`MCP01:2025`–`MCP10:2025`) | `modelcontextprotocol.io`, `static.modelcontextprotocol.io`, `registry.modelcontextprotocol.io`, `owasp.org` | S+ | 2026-11-20 | `server.json`, `src/mcp/`, `docs/harnesses.md` | 2027-02-20 |
 | 11 | npm Trusted Publishing keyless GitHub Actions OIDC (`npm >= 11.5.1`) with automatic Sigstore provenance & Antigravity plugin CLI strict validation (`agy.exe v1.5.13`) | `npmjs.com`, `antigravity.google`, verified locally via `agy.exe` | P | 2026-11-21 | `.github/workflows/release.yml`, `mcp_config.json`, `docs/harnesses.md` | 2027-02-21 |
 | 12 | Antigravity plugin schema (`schemas/v1/plugin.json`), Marketplace partner submission (`forms.gle/2EX5RFYPoJe1UgxR9`), `PreToolUse` hook contract (`agy >= v1.5.13`), and OAuth 2.1 / RFC 9728 / RFC 8707 / CIMD specifications | `antigravity.google`, `forms.gle`, `datatracker.ietf.org` | P | 2026-11-21 | `plugin.json`, `hooks.json`, `README.md`, `docs/harnesses.md`, `docs/privacy.md` | 2027-02-21 |
+| 13 | Coldpin static documentation portal deployed on Cloudflare Pages (`coldpin-docs.pages.dev`, edge HTTP security headers via `site/_headers`) and GitHub Pages (`hynko431.github.io/Coldpin-npx-Safe-Finder/`) | `coldpin-docs.pages.dev`, `hynko431.github.io` | P | 2026-11-22 | `CHANGELOG.md`, `site/`, `.github/workflows/pages.yml` | 2027-02-22 |
 
 ## Approved URL Host Allow-List (Checked by `scripts/verify_hygiene.py`)
 
-`registry.npmjs.org`, `api.osv.dev`, `json.schemastore.org`, `github.com`, `attack.mitre.org`, `atlas.mitre.org`, `owasp.org`, `cert-in.org.in`, `meity.gov.in`, `eur-lex.europa.eu`, `oasis-open.org`, `cyclonedx.org`, `cisa.gov`, `slsa.dev`, `in-toto.io`, `sigstore.dev`, `www.apache.org`, `artifactory.acme.internal`, `model_signing`, `keepachangelog.com`, `modelcontextprotocol.io`, `static.modelcontextprotocol.io`, `registry.modelcontextprotocol.io`, `antigravity.google`, `npmjs.com`, `nodejs.org`, `forms.gle`, `datatracker.ietf.org`.
+`registry.npmjs.org`, `api.osv.dev`, `json.schemastore.org`, `github.com`, `attack.mitre.org`, `atlas.mitre.org`, `owasp.org`, `cert-in.org.in`, `meity.gov.in`, `eur-lex.europa.eu`, `oasis-open.org`, `cyclonedx.org`, `cisa.gov`, `slsa.dev`, `in-toto.io`, `sigstore.dev`, `www.apache.org`, `artifactory.acme.internal`, `model_signing`, `keepachangelog.com`, `modelcontextprotocol.io`, `static.modelcontextprotocol.io`, `registry.modelcontextprotocol.io`, `antigravity.google`, `npmjs.com`, `nodejs.org`, `forms.gle`, `datatracker.ietf.org`, `coldpin-docs.pages.dev`, `hynko431.github.io`.
