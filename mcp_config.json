@@ -5,6 +5,16 @@
       "args": ["--no-warnings", "${PLUGIN_ROOT}/lib/mcp.mjs"],
       "env": {
         "COLDPIN_CACHE_DIR": "${PLUGIN_DATA}"
+      },
+      "timeoutSeconds": 300,
+      "tools": {
+        "discover_packages": { "eager": true },
+        "inspect_package_artifact": { "eager": true },
+        "resolve_safe_anchor": { "eager": true },
+        "verify_confusion": { "eager": true },
+        "audit_manifest_batch": { "eager": true },
+        "audit_verify": { "eager": true },
+        "get_artifact_report": { "eager": true }
       }
     }
   }

@@ -1,0 +1,42 @@
+{
+  "mcpServers": {
+    "coldpin": {
+      "command": "node",
+      "args": ["--no-warnings", "${PLUGIN_ROOT}/lib/mcp.mjs"],
+      "env": {
+        "COLDPIN_CACHE_DIR": "${PLUGIN_DATA}",
+        "COLDPIN_PRIVATE_SCOPES": "${COLDPIN_PRIVATE_SCOPES}",
+        "COLDPIN_PRIVATE_REGISTRY_URL": "${COLDPIN_PRIVATE_REGISTRY_URL}",
+        "COLDPIN_REGISTRY_TOKEN": "${COLDPIN_REGISTRY_TOKEN}"
+      },
+      "timeoutSeconds": 300,
+      "variables": [
+        {
+          "name": "COLDPIN_PRIVATE_SCOPES",
+          "title": "Private npm Scopes (comma-separated)",
+          "description": "Internal npm scopes routed exclusively to your private registry (for example @acme,@acme-internal). Never queried against public registry.npmjs.org or api.osv.dev."
+        },
+        {
+          "name": "COLDPIN_PRIVATE_REGISTRY_URL",
+          "title": "Private npm Registry URL (HTTPS)",
+          "description": "HTTPS private npm registry endpoint (for example https://artifactory.acme.internal/api/npm/npm-local). Must be HTTPS and non-metadata/non-loopback."
+        },
+        {
+          "name": "COLDPIN_REGISTRY_TOKEN",
+          "title": "Private Registry Read-Only Token",
+          "description": "Least-privilege read-only bearer token sent strictly over HTTPS to the exact configured private registry host. Never passed via CLI args.",
+          "link": "https://artifactory.acme.internal/docs/npm-tokens"
+        }
+      ],
+      "tools": {
+        "discover_packages": { "eager": true },
+        "inspect_package_artifact": { "eager": true },
+        "resolve_safe_anchor": { "eager": true },
+        "verify_confusion": { "eager": true },
+        "audit_manifest_batch": { "eager": true },
+        "audit_verify": { "eager": true },
+        "get_artifact_report": { "eager": true }
+      }
+    }
+  }
+}

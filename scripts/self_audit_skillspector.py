@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""SkillSpector-class Deterministic Self-Audit for Coldpin (v1.3.0).
+"""SkillSpector-class Deterministic Self-Audit for Coldpin (v1.5.0).
 
-Audits skills/coldpin/, src/, scripts/, rules/, and multi-harness/MCP manifests across
-NVIDIA SkillSpector's threat categories + Coldpin MCP & compiled-runtime supply-chain gates:
+Audits skills/coldpin/, skills/coldpin-audit/, skills/coldpin-incident/, src/, scripts/, catalog/,
+rules/, agents/, hooks.json, examples/, and multi-harness/MCP manifests across
+NVIDIA SkillSpector's threat categories + Coldpin MCP & Antigravity plugin supply-chain gates:
 - SS-03 (import-aware): allow ONLY async `execFile` from `node:child_process` in allowlisted files;
   flag sync `execFileSync(` as `SS-03-SYNC-EXEC-BLOCKING`; never false-positive on `RegExp.exec()` or `db.exec()`.
-- SS-04..SS-10: unpinned `npx -y`, secrets, persistence, hidden/bidi Unicode, manifest hooks, bounded network, symlinks.
-- SS-11: MCP `tools/list` + `resources/list` + `prompts/list` SHA-256 rug-pull pin (`rules/mcp-schema-pin.json`),
+- SS-04..SS-10: unpinned `npx -y`, secrets, persistence, hidden/bidi Unicode, `SS-08-HOOK-LEAST-PRIV`, bounded network, symlinks.
+- SS-11: MCP `tools/list` + `resources/list` + `prompts/list` SHA-256 rug-pull pin (`catalog/mcp-schema-pin.json`),
   zero listening network sockets in `src/`, and zero stray `stdout` writes in pure-core modules.
-- SS-12: Structured JSON least-privilege audit of `mcp_config.json`, `server.json`, and `.claude-plugin/plugin.json`.
+- SS-12: Structured JSON least-privilege audit of `mcp_config.json`, `examples/mcp_config.*.json`, `server.json`, and `.claude-plugin/plugin.json`.
 - SS-13: Zero-noise 1:1 cryptographic parity between `src/**/*.ts` and committed `lib/**/*.mjs` (`build_lib.ts --check`).
+- SS-14: Strictly read-only agent/subagent least privilege (`agents/*.md`).
+- SS-15: Pure Markdown `rules/` hygiene (flat `.md`-only, zero `@[label](path)`, `AGENTS.md <= 1,800` bytes).
 """
 
 import json
@@ -104,14 +107,57 @@ def audit_mcp_manifests(findings: list[Finding]) -> None:
                         Finding("SS-12-MCP-CONFIG-LEAST-PRIV", "HIGH", "mcp_config.json", 1, "mcp_config.json does not target compiled lib/mcp.mjs", "Reject: must target ${PLUGIN_ROOT}/lib/mcp.mjs.", True)
                     )
                 for ek, ev in (srv.get("env") or {}).items():
+                    if ek in ("PLUGIN_ROOT", "PLUGIN_DATA"):
+                        findings.append(
+                            Finding("SS-12-MCP-CONFIG-LEAST-PRIV", "HIGH", "mcp_config.json", 1, f"Duplicate built-in env key '{ek}' in mcp_config.json", "Reject: Antigravity injects PLUGIN_ROOT/PLUGIN_DATA automatically.", True)
+                        )
                     if isinstance(ev, str) and re.search(r"(?:ghp_|github_pat_|npm_|AKIA|sk-)", ev):
                         findings.append(
                             Finding("SS-12-MCP-CONFIG-LEAST-PRIV", "CRITICAL", "mcp_config.json", 1, f"Hardcoded secret in mcp_config.json env '{ek}'", "Reject: never embed credentials in MCP config.", True)
                         )
+                var_names = {v.get("name") for v in (srv.get("variables") or []) if isinstance(v, dict) and isinstance(v.get("name"), str)}
+                if var_names:
+                    for arg in args:
+                        if isinstance(arg, str) and any(f"${{{vn}}}" in arg for vn in var_names):
+                            findings.append(
+                                Finding("SS-12-MCP-CONFIG-LEAST-PRIV", "HIGH", "mcp_config.json", 1, "MCP variable passed via CLI args", "Reject: pass variables strictly via env/headers.", True)
+                            )
         except json.JSONDecodeError as exc:
             findings.append(
                 Finding("SS-12-MCP-CONFIG-LEAST-PRIV", "HIGH", "mcp_config.json", 1, f"Malformed JSON in mcp_config.json: {exc}", "Reject: invalid JSON.", True)
             )
+
+    # Also audit optional enterprise MCP overlay templates (`examples/mcp_config.*.json`)
+    examples_dir = ROOT / "examples"
+    if examples_dir.is_dir():
+        for ex_path in sorted(examples_dir.glob("mcp_config.*.json")):
+            ex_rel = ex_path.relative_to(ROOT).as_posix()
+            try:
+                ecfg = json.loads(ex_path.read_text(encoding="utf-8"))
+                for sname, srv in (ecfg.get("mcpServers") or {}).items():
+                    if not isinstance(srv, dict):
+                        continue
+                    for ek in (srv.get("env") or {}).keys():
+                        if ek in ("PLUGIN_ROOT", "PLUGIN_DATA"):
+                            findings.append(
+                                Finding("SS-12-MCP-CONFIG-LEAST-PRIV", "HIGH", ex_rel, 1, f"Duplicate built-in env key '{ek}' in {ex_rel}", "Reject: do not duplicate PLUGIN_ROOT/PLUGIN_DATA.", True)
+                            )
+                    var_names = {v.get("name") for v in (srv.get("variables") or []) if isinstance(v, dict) and isinstance(v.get("name"), str)}
+                    for arg in srv.get("args", []):
+                        if isinstance(arg, str) and any(f"${{{vn}}}" in arg for vn in var_names):
+                            findings.append(
+                                Finding("SS-12-MCP-CONFIG-LEAST-PRIV", "HIGH", ex_rel, 1, f"MCP variable leaked into CLI args in '{sname}'", "Reject: pass variables strictly via env/headers.", True)
+                            )
+                    cmd_str = str(srv.get("command") or "")
+                    url_str = str(srv.get("serverUrl") or srv.get("url") or "")
+                    if any(f"${{{vn}}}" in cmd_str or f"${{{vn}}}" in url_str for vn in var_names):
+                        findings.append(
+                            Finding("SS-12-MCP-CONFIG-LEAST-PRIV", "HIGH", ex_rel, 1, f"MCP variable leaked into command/url in '{sname}'", "Reject: pass variables strictly via env/headers.", True)
+                        )
+            except json.JSONDecodeError as exc:
+                findings.append(
+                    Finding("SS-12-MCP-CONFIG-LEAST-PRIV", "HIGH", ex_rel, 1, f"Malformed JSON in {ex_rel}: {exc}", "Reject: invalid JSON.", True)
+                )
 
     srv_json_path = ROOT / "server.json"
     if not srv_json_path.exists():
@@ -163,17 +209,17 @@ def audit_mcp_manifests(findings: list[Finding]) -> None:
 
 
 def audit_mcp_schema_pin(findings: list[Finding]) -> None:
-    pin_path = ROOT / "rules" / "mcp-schema-pin.json"
+    pin_path = ROOT / "catalog" / "mcp-schema-pin.json"
     if not pin_path.exists():
         findings.append(
-            Finding("SS-11-MCP-TOOL-SCHEMA-PIN", "CRITICAL", "rules/mcp-schema-pin.json", 1, "Missing rules/mcp-schema-pin.json", "Reject: MCP schema rug-pull pin required.", True)
+            Finding("SS-11-MCP-TOOL-SCHEMA-PIN", "CRITICAL", "catalog/mcp-schema-pin.json", 1, "Missing catalog/mcp-schema-pin.json", "Reject: MCP schema rug-pull pin required.", True)
         )
         return
     try:
         pinned = json.loads(pin_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         findings.append(
-            Finding("SS-11-MCP-TOOL-SCHEMA-PIN", "CRITICAL", "rules/mcp-schema-pin.json", 1, f"Malformed mcp-schema-pin.json: {exc}", "Reject: invalid JSON.", True)
+            Finding("SS-11-MCP-TOOL-SCHEMA-PIN", "CRITICAL", "catalog/mcp-schema-pin.json", 1, f"Malformed mcp-schema-pin.json: {exc}", "Reject: invalid JSON.", True)
         )
         return
 
@@ -202,7 +248,7 @@ def audit_mcp_schema_pin(findings: list[Finding]) -> None:
                 Finding(
                     "SS-11-MCP-TOOL-SCHEMA-PIN",
                     "CRITICAL",
-                    "rules/mcp-schema-pin.json",
+                    "catalog/mcp-schema-pin.json",
                     1,
                     f"MCP schema pin drift on '{k}': pinned={pinned.get(k)} != live={live.get(k)}",
                     "Reject: unexpected tool/resource/prompt schema mutation (potential rug pull).",
@@ -268,9 +314,15 @@ def scan_repo() -> list[Finding]:
 
     scan_roots = [
         ROOT / "skills" / "coldpin",
+        ROOT / "skills" / "coldpin-audit",
+        ROOT / "skills" / "coldpin-incident",
         ROOT / "src",
         ROOT / "scripts",
+        ROOT / "catalog",
         ROOT / "rules",
+        ROOT / "agents",
+        ROOT / "examples",
+        ROOT / "hooks.json",
         ROOT / "plugin.json",
         ROOT / "mcp_config.json",
         ROOT / "server.json",
@@ -543,22 +595,136 @@ def scan_repo() -> list[Finding]:
                     )
                 )
 
-    # SS-08: Manifest least privilege & no auto-approval hooks
+    # SS-08: Manifest & PreToolUse Hook Least Privilege (`SS-08-HOOK-LEAST-PRIV`)
     for mpath in (ROOT / "plugin.json", ROOT / ".claude-plugin" / "plugin.json", ROOT / ".codex-plugin" / "plugin.json"):
         if mpath.exists():
             data = json.loads(mpath.read_text(encoding="utf-8"))
             if "hooks" in data:
                 findings.append(
                     Finding(
-                        "SS-08-MANIFEST-HOOKS",
+                        "SS-08-HOOK-LEAST-PRIV",
                         "HIGH",
                         mpath.relative_to(ROOT).as_posix(),
                         1,
-                        "Manifest declares lifecycle hooks",
-                        "Reject: runtime plugin must not register permission-approval hooks.",
+                        "Manifest declares inline lifecycle hooks",
+                        "Reject: lifecycle hooks must live strictly in root hooks.json, never inside plugin.json.",
                         True,
                     )
                 )
+
+    forbidden_hook_tokens = ("auto_approve", "permissionOverrides", "overwrite", "allowTool", "allow_tool")
+    hooks_json_path = ROOT / "hooks.json"
+    if hooks_json_path.exists():
+        h_raw = hooks_json_path.read_text(encoding="utf-8")
+        for tok in forbidden_hook_tokens:
+            if tok in h_raw:
+                findings.append(
+                    Finding("SS-08-HOOK-LEAST-PRIV", "CRITICAL", "hooks.json", 1, f"Forbidden auto-approval token '{tok}' in hooks.json", "Reject: hooks must never auto-approve or override permissions.", True)
+                )
+        try:
+            hdoc = json.loads(h_raw)
+            for gname, gobj in (hdoc.items() if isinstance(hdoc, dict) else []):
+                if not isinstance(gobj, dict):
+                    continue
+                for entry in gobj.get("PreToolUse", []):
+                    for h in entry.get("hooks", []):
+                        cmd = str(h.get("command") or "")
+                        if "${PLUGIN_ROOT}" in cmd:
+                            findings.append(
+                                Finding("SS-08-HOOK-LEAST-PRIV", "HIGH", "hooks.json", 1, f"Hook '{gname}' interpolates ${{PLUGIN_ROOT}} in command", "Reject: use relative ./lib/hook.mjs (cwd is plugin root).", True)
+                            )
+                        if not cmd.startswith("node "):
+                            findings.append(
+                                Finding("SS-08-HOOK-LEAST-PRIV", "HIGH", "hooks.json", 1, f"Hook '{gname}' uses non-node interpreter '{cmd}'", "Reject: invoke node directly.", True)
+                            )
+                        if not isinstance(h.get("timeout"), int) or h.get("timeout") <= 0:
+                            findings.append(
+                                Finding("SS-08-HOOK-LEAST-PRIV", "HIGH", "hooks.json", 1, f"Hook '{gname}' missing positive timeout", "Reject: set explicit bounded timeout.", True)
+                            )
+        except json.JSONDecodeError as exc:
+            findings.append(
+                Finding("SS-08-HOOK-LEAST-PRIV", "HIGH", "hooks.json", 1, f"Malformed hooks.json: {exc}", "Reject: invalid JSON.", True)
+            )
+
+    hook_src_path = ROOT / "src" / "hook.ts"
+    if hook_src_path.exists():
+        hsrc = hook_src_path.read_text(encoding="utf-8")
+        if not hsrc.startswith("#!/usr/bin/env node\n"):
+            findings.append(
+                Finding("SS-08-HOOK-LEAST-PRIV", "HIGH", "src/hook.ts", 1, "src/hook.ts missing line-1 #!/usr/bin/env node shebang", "Reject: required for 0755 executable compilation.", True)
+            )
+        # Strip JS comments before scanning for forbidden decision tokens & disallowed APIs
+        hsrc_nc = re.sub(r"/\*[\s\S]*?\*/|//[^\n]*", "", hsrc)
+        for tok in forbidden_hook_tokens:
+            if f'"{tok}"' in hsrc_nc or f"'{tok}'" in hsrc_nc or f"{tok}:" in hsrc_nc:
+                findings.append(
+                    Finding("SS-08-HOOK-LEAST-PRIV", "CRITICAL", "src/hook.ts", 1, f"Forbidden hook decision/override token '{tok}' in src/hook.ts", "Reject: hook must never auto-approve or override permissions.", True)
+                )
+        for bad_api in ("node:child_process", "node:http", "node:https", "node:net", "node:sqlite", "fetch(", "import.meta.dirname"):
+            if bad_api in hsrc_nc:
+                findings.append(
+                    Finding("SS-08-HOOK-LEAST-PRIV", "HIGH", "src/hook.ts", 1, f"Disallowed API '{bad_api}' in ES2020 hook src/hook.ts", "Reject: hook must stay pure ES2020 with zero network/subprocess/Node-24-only APIs.", True)
+                )
+
+    # SS-14: Strictly Read-Only Custom Agent & Subagent Least Privilege (`agents/*.md`)
+    agents_dir = ROOT / "agents"
+    canonical_agent_tools = {"view_file", "grep_search", "find_by_name", "list_dir", "send_message", "invoke_subagent"}
+    if agents_dir.is_dir():
+        for af in sorted(agents_dir.glob("*.md")):
+            arel = af.relative_to(ROOT).as_posix()
+            atxt = af.read_text(encoding="utf-8")
+            afm = re.match(r"^---\r?\n(.*?)\r?\n---", atxt, re.S)
+            if not afm:
+                findings.append(Finding("SS-14-AGENT-LEAST-PRIV", "HIGH", arel, 1, "Missing YAML frontmatter in agent", "Reject: explicit least-privilege frontmatter required.", True))
+                continue
+            fm = afm.group(1)
+            if not re.search(r'^commandExecutionPolicy:\s*"?off"?\s*$', fm, re.M):
+                findings.append(Finding("SS-14-AGENT-LEAST-PRIV", "HIGH", arel, 1, "Agent omits commandExecutionPolicy: \"off\"", "Reject: all Coldpin agents must disable shell execution.", True))
+            is_main = bool(re.search(r"^mainAgent:\s*true\s*$", fm, re.M))
+            if not is_main and not re.search(r"^inheritCustomizations:\s*false\s*$", fm, re.M):
+                findings.append(Finding("SS-14-AGENT-LEAST-PRIV", "HIGH", arel, 1, "Background subagent omits inheritCustomizations: false", "Reject: isolate background subagents from untrusted workspace rules/hooks ([PLG-15]).", True))
+            if re.search(r"^mcpServers:\s*\n\s*-\s*[\"']?[A-Za-z0-9_-]+[\"']?\s*$", fm, re.M):
+                findings.append(Finding("SS-14-AGENT-LEAST-PRIV", "HIGH", arel, 1, "Agent uses invalid string-array mcpServers", "Reject: breaks agy YAML loading.", True))
+            tools_m = re.search(r"^tools:\s*\n((?:\s+-\s+\S+\s*\n?)+)", fm, re.M)
+            if not tools_m:
+                findings.append(Finding("SS-14-AGENT-LEAST-PRIV", "HIGH", arel, 1, "Agent omits explicit read-only tools allowlist", "Reject: explicit read-only allowlist required.", True))
+            else:
+                for ln in tools_m.group(1).splitlines():
+                    t = ln.strip().lstrip("-").strip().strip("\"'")
+                    if not t:
+                        continue
+                    if t not in canonical_agent_tools:
+                        findings.append(Finding("SS-14-AGENT-LEAST-PRIV", "HIGH", arel, 1, f"Agent grants disallowed/non-canonical tool '{t}'", "Reject: strictly read-only canonical tools only.", True))
+                    elif t == "invoke_subagent" and not is_main:
+                        findings.append(Finding("SS-14-AGENT-LEAST-PRIV", "HIGH", arel, 1, "Leaf subagent grants invoke_subagent", "Reject: only primary orchestrator may invoke subagents.", True))
+            skills_m = re.search(r"^skills:\s*\n((?:\s+-\s+\S+\s*\n?)+)", fm, re.M)
+            if skills_m:
+                for ln in skills_m.group(1).splitlines():
+                    sp = ln.strip().lstrip("-").strip().strip("\"'")
+                    if sp and not (ROOT / sp / "SKILL.md").exists():
+                        findings.append(Finding("SS-14-AGENT-LEAST-PRIV", "HIGH", arel, 1, f"Agent references non-existent skill '{sp}'", "Reject: every declared skill must exist.", True))
+
+    # SS-15: Pure Markdown Rules Hygiene (`rules/`)
+    rules_dir = ROOT / "rules"
+    if rules_dir.is_dir():
+        for entry in sorted(rules_dir.iterdir()):
+            rrel = entry.relative_to(ROOT).as_posix()
+            if entry.is_dir() or entry.suffix.lower() != ".md":
+                findings.append(Finding("SS-15-RULES-HYGIENE", "HIGH", rrel, 1, f"Non-Markdown entry in rules/: {entry.name}", "Reject: relocate scanner data to catalog/.", True))
+                continue
+            r_raw = entry.read_bytes()
+            r_txt = r_raw.decode("utf-8")
+            if re.search(r"@\[[^\]]+\]\([^)]+\)", r_txt):
+                findings.append(Finding("SS-15-RULES-HYGIENE", "HIGH", rrel, 1, "Rule uses @[label](path) file include", "Reject: file includes banned in plugin rules ([PLG-14]).", True))
+            if entry.name in ("AGENTS.md", "GEMINI.md"):
+                if len(r_raw) > 1800:
+                    findings.append(Finding("SS-15-RULES-HYGIENE", "HIGH", rrel, 1, f"{entry.name} exceeds 1,800-byte budget ({len(r_raw)} bytes)", "Reject: preserve defaultRulesBudget headroom.", True))
+            else:
+                rfm = re.match(r"^---\r?\n(.*?)\r?\n---", r_txt, re.S)
+                if not rfm or not re.search(r"^trigger:\s*(?:always_on|model_decision|glob|manual)\s*$", rfm.group(1), re.M):
+                    findings.append(Finding("SS-15-RULES-HYGIENE", "HIGH", rrel, 1, f"Named rule {entry.name} missing valid trigger frontmatter", "Reject: declare valid Antigravity trigger.", True))
+                elif re.search(r"^globs:\s*\n\s*-", rfm.group(1), re.M):
+                    findings.append(Finding("SS-15-RULES-HYGIENE", "HIGH", rrel, 1, f"Named rule {entry.name} uses YAML array globs", "Reject: globs must be a quoted comma-separated string.", True))
 
     # SS-11, SS-12, SS-13 MCP & compiled-runtime supply-chain gates
     audit_mcp_manifests(findings)
@@ -633,19 +799,19 @@ def emit_triage_report(findings: list[Finding], dest: Path) -> tuple[str, int]:
 
 ## Skill Inspector: `coldpin`
 
-**Source:** `skills/coldpin/` + `src/` + `lib/` (1:1 parity-verified) + `scripts/` + `rules/` + multi-harness & MCP manifests
-**Verdict:** `{verdict}` — {"Zero blocking HIGH/CRITICAL findings; documented network and read-only async git/probe surfaces are bounded, hardened, and controllable; MCP schema pin and compiled lib/ parity verified." if verdict == "APPROVE" else "Blocking security findings require remediation before installation."}
+**Source:** `skills/` (3 skills) + `src/` + `lib/` (1:1 parity-verified) + `scripts/` + `catalog/` + `rules/` (3) + `agents/` (7) + `hooks.json` (3 groups) + multi-harness & MCP manifests
+**Verdict:** `{verdict}` — {"Zero blocking HIGH/CRITICAL findings; documented network and read-only async git/probe surfaces are bounded, hardened, and controllable; MCP schema pin, read-only agents, fail-safe PreToolUse hooks, rules hygiene, and compiled lib/ parity verified." if verdict == "APPROVE" else "Blocking security findings require remediation before installation."}
 **Risk:** {score}/100 · {severity_band} · {rec}
-**Install posture:** Suitable for local developer workspaces, IDE MCP hosts (stdio), and CI verification pipelines on Node.js >= 24; not a substitute for runtime EDR or isolated detonation on dynamically fetched payloads.
+**Install posture:** Suitable for local developer workspaces, Antigravity App/CLI (`>= v1.5.13`), IDE MCP hosts (stdio), and CI verification pipelines on Node.js >= 24; not a substitute for runtime EDR or isolated detonation on dynamically fetched payloads.
 
 ### Bottom Line
-Deterministic SkillSpector-class static scanning (`--no-llm` equivalent, with zero whole-file skips on `src/`) and source-aware review found **{len(blocking)} blocking findings** and **{len(findings) - len(blocking)} documented low-risk capabilities**. The implementation matches the stated zero-execution `npx` discovery, vetting, and local `stdio` MCP server purpose without hidden hooks, listening sockets, persistence, symlinks, dynamic `eval`, silent package installs, or compiled runtime drift.
+Deterministic SkillSpector-class static scanning (`--no-llm` equivalent, with zero whole-file skips on `src/`) and source-aware review found **{len(blocking)} blocking findings** and **{len(findings) - len(blocking)} documented low-risk capabilities**. The implementation matches the stated zero-execution `npx` discovery, vetting, local `stdio` MCP server, read-only aspect subagents, and fail-safe `PreToolUse` guarding purpose without auto-approval hooks, listening sockets, persistence, symlinks, dynamic `eval`, silent package installs, or compiled runtime drift.
 
 ### Signal Overview
 | Source | Result | Interpretation |
 |---|---|---|
-| Deterministic static self-audit (`SS-03`–`SS-13`) | `{len(blocking)}` blocking, `{len(findings) - len(blocking)}` documented LOW | Clean across Unicode, secrets, `shell=True`, import-aware child_process, dynamic `eval`, persistence, symlinks, manifest hooks, MCP schema pin, MCP config least privilege, and `src/` ↔ `lib/` 1:1 parity. |
-| Source-aware semantic review | Purpose & permission fit verified | `SKILL.md` and `lib/mcp.mjs` enforce operator-only control plane, human confirmation, private-scope isolation, and non-LLM verdict authority. |
+| Deterministic static self-audit (`SS-03`–`SS-15`) | `{len(blocking)}` blocking, `{len(findings) - len(blocking)}` documented LOW | Clean across Unicode, secrets, `shell=True`, import-aware child_process, dynamic `eval`, persistence, symlinks, `SS-08` hook least privilege, MCP schema pin, MCP config least privilege, `src/` ↔ `lib/` 1:1 parity, `SS-14` read-only agents, and `SS-15` rules hygiene. |
+| Source-aware semantic review | Purpose & permission fit verified | `SKILL.md`, `rules/`, `agents/`, `hooks.json`, and `lib/mcp.mjs` enforce operator-only control plane, human confirmation, private-scope isolation, and non-LLM verdict authority. |
 | Sensitive surface | Hardened read-only async `git` (`core.fsmonitor=false`, `core.hooksPath=/dev/null`, `http.followRedirects=false`, minimal env), SSRF/DNS/redirect-hardened HTTPS `fetch`, read-only `--version` probe | Strictly scoped, disabled in `--offline` mode, private scopes never hit public endpoints, HTTPS-only Bearer auth, cross-origin redirects strip credentials. |
 
 ### Key Evidence
@@ -654,11 +820,11 @@ Deterministic SkillSpector-class static scanning (`--no-llm` equivalent, with ze
 {rows}
 
 ### Diagnosis
-Every observed sensitive call site (`src/intel/registry-osv.ts` HTTPS registry/OSV fetch, `src/analysis/parity-and-bisect.ts` hardened read-only async `git`, and `src/config/policy.ts` read-only async `git`/`rea` `--version` probe) was located dynamically by line number, verified to disable shell interpolation, Git redirects, and Git hooks, and remains controllable via `--offline` / `COLDPIN_OFFLINE=1` and operator policy. All 19 compiled ESM files under `lib/` match `src/` 1:1 cryptographically (`SS-13`), and the canonical MCP `tools/list` + `resources/list` + `prompts/list` catalog matches `rules/mcp-schema-pin.json` (`SS-11`). External `skillspector` CLI binary was not installed on `PATH` on this host, so this report reflects the repo's deterministic SkillSpector-equivalent static checker plus manual source review.
+Every observed sensitive call site (`src/intel/registry-osv.ts` HTTPS registry/OSV fetch, `src/analysis/parity-and-bisect.ts` hardened read-only async `git`, and `src/config/policy.ts` read-only async `git`/`rea` `--version` probe) was located dynamically by line number, verified to disable shell interpolation, Git redirects, and Git hooks, and remains controllable via `--offline` / `COLDPIN_OFFLINE=1` and operator policy. All 20 compiled ESM files under `lib/` match `src/` 1:1 cryptographically (`SS-13`), and the canonical MCP `tools/list` + `resources/list` + `prompts/list` catalog matches `catalog/mcp-schema-pin.json` (`SS-11`). External `skillspector` CLI binary was not installed on `PATH` on this host, so this report reflects the repo's deterministic SkillSpector-equivalent static checker plus manual source review.
 
 ### Guardrails
-1. Keep `.coldpin.policy.json` configured with `private_scopes` and `private_prefixes` before running against internal organization repositories; in MCP mode configure policy via `COLDPIN_POLICY_PATH`.
-2. Never add automatic command-approval hooks to `plugin.json`; require explicit human confirmation before executing any emitted `npx` command.
+1. Keep `.coldpin.policy.json` configured with `private_scopes` and `private_prefixes` before running against internal organization repositories; in MCP mode configure policy via `COLDPIN_POLICY_PATH` or `COLDPIN_PRIVATE_*` env vars.
+2. Never add automatic command-approval hooks (`auto_approve`, `permissionOverrides`, `overwrite`) to `hooks.json` or `plugin.json`; require explicit human confirmation before executing any emitted `npx` command.
 3. Re-run `npm run audit:self` and inspect `dist/skillspector-self-audit.sarif` on every PR and release.
 """
     dest.write_text(md, encoding="utf-8", newline="\n")

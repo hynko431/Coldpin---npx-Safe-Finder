@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Cryptographic Skill Attestation Signer & Verifier (`skill.oms.sig`)
+ * Cryptographic Skill & Antigravity Plugin Attestation Signer & Verifier
+ * (`skills/coldpin/skill.oms.sig` and `catalog/plugin.oms.sig`)
  * Modeled on NVIDIA Auto-Ontology's Sigstore Bundle v0.3 + in-toto DSSE v1.0 envelope
  * (`https://in-toto.io/Statement/v1`, `https://model_signing/signature/v1.0`, `allow_symlinks: false`).
  *
@@ -10,28 +11,29 @@
  */
 
 import { createHash, createSign, createVerify, generateKeyPairSync } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const SKILL_DIR = join(ROOT, "skills", "coldpin");
-const SIG_PATH = join(SKILL_DIR, "skill.oms.sig");
+const SKILL_SIG_PATH = join(SKILL_DIR, "skill.oms.sig");
+const PLUGIN_SIG_PATH = join(ROOT, "catalog", "plugin.oms.sig");
 const PAYLOAD_TYPE = "application/vnd.in-toto+json";
 
-function collectSkillFiles(dir: string): Array<{ rel: string; full: string }> {
+function collectFilesRecursive(dir: string, baseDir: string, ignoreRel: Set<string>): Array<{ rel: string; full: string }> {
   const out: Array<{ rel: string; full: string }> = [];
   const walk = (cur: string) => {
     for (const name of readdirSync(cur).sort()) {
       const full = join(cur, name);
       const st = lstatSync(full);
       if (st.isSymbolicLink()) {
-        throw new Error(`Symlink rejected in signed skill bundle (allow_symlinks=false): ${full}`);
+        throw new Error(`Symlink rejected in signed bundle (allow_symlinks=false): ${full}`);
       }
       if (st.isDirectory()) {
         walk(full);
       } else if (st.isFile()) {
-        const rel = relative(dir, full).replace(/\\/g, "/");
-        if (rel === "skill.oms.sig") continue;
+        const rel = relative(baseDir, full).replace(/\\/g, "/");
+        if (ignoreRel.has(rel)) continue;
         out.push({ rel, full });
       }
     }
@@ -40,11 +42,59 @@ function collectSkillFiles(dir: string): Array<{ rel: string; full: string }> {
   return out.sort((a, b) => a.rel.localeCompare(b.rel));
 }
 
-function computeFileDigests(dir: string): {
+function collectPluginRootFiles(): Array<{ rel: string; full: string }> {
+  const rels = new Set<string>();
+  const addSingle = (rel: string) => {
+    const full = join(ROOT, rel);
+    if (!existsSync(full)) {
+      throw new Error(`Missing required Antigravity plugin artifact for plugin.oms.sig: ${rel}`);
+    }
+    const st = lstatSync(full);
+    if (st.isSymbolicLink()) {
+      throw new Error(`Symlink rejected in signed plugin bundle (allow_symlinks=false): ${full}`);
+    }
+    rels.add(rel);
+  };
+
+  for (const single of [
+    "plugin.json",
+    "mcp_config.json",
+    "hooks.json",
+    "assets/icon.svg",
+    "skills/coldpin-audit/SKILL.md",
+    "skills/coldpin-incident/SKILL.md",
+    "catalog/triage-rules.json",
+    "catalog/mcp-schema-pin.json",
+  ]) {
+    addSingle(single);
+  }
+
+  for (const [subDir, suffix] of [
+    ["rules", ".md"],
+    ["agents", ".md"],
+    ["catalog/sigma", ".yml"],
+    ["lib", ".mjs"],
+  ] as const) {
+    const dir = join(ROOT, subDir);
+    if (!existsSync(dir)) {
+      throw new Error(`Missing required Antigravity plugin directory for plugin.oms.sig: ${subDir}`);
+    }
+    for (const f of collectFilesRecursive(dir, ROOT, new Set(["catalog/plugin.oms.sig"]))) {
+      if (f.rel.endsWith(suffix)) {
+        rels.add(f.rel);
+      }
+    }
+  }
+
+  return Array.from(rels)
+    .sort((a, b) => a.localeCompare(b))
+    .map((rel) => ({ rel, full: join(ROOT, rel) }));
+}
+
+function computeDigestsFromList(files: Array<{ rel: string; full: string }>): {
   resources: Array<{ algorithm: "sha256"; name: string; digest: string }>;
   subjectDigest: string;
 } {
-  const files = collectSkillFiles(dir);
   const resources = files.map((f) => ({
     algorithm: "sha256" as const,
     name: f.rel,
@@ -67,18 +117,18 @@ function dssePae(payloadType: string, payloadBytes: Buffer): Buffer {
   ]);
 }
 
-function signSkill(): void {
-  const { resources, subjectDigest } = computeFileDigests(SKILL_DIR);
+function signBundle(subjectName: string, files: Array<{ rel: string; full: string }>, sigPath: string, ignorePaths: string[]): void {
+  const { resources, subjectDigest } = computeDigestsFromList(files);
   const statement = {
     _type: "https://in-toto.io/Statement/v1",
-    subject: [{ name: "coldpin", digest: { sha256: subjectDigest } }],
+    subject: [{ name: subjectName, digest: { sha256: subjectDigest } }],
     predicateType: "https://model_signing/signature/v1.0",
     predicate: {
       serialization: {
         allow_symlinks: false,
         hash_type: "sha256",
         method: "files",
-        ignore_paths: [".git", ".github", ".gitattributes", ".gitignore", "skill.oms.sig"],
+        ignore_paths: ignorePaths,
       },
       resources,
     },
@@ -108,30 +158,31 @@ function signSkill(): void {
     },
   };
 
-  writeFileSync(SIG_PATH, `${JSON.stringify(bundle, null, 2)}\n`, "utf8");
-  console.log(`SIGNED SKILL OK: ${resources.length} files attested -> skill.oms.sig (subject sha256=${subjectDigest.slice(0, 16)}..., keyid=${keyId})`);
+  writeFileSync(sigPath, `${JSON.stringify(bundle, null, 2)}\n`, "utf8");
+  const relSig = relative(ROOT, sigPath).replace(/\\/g, "/");
+  console.log(`SIGNED OK [${subjectName}]: ${resources.length} files attested -> ${relSig} (subject sha256=${subjectDigest.slice(0, 16)}..., keyid=${keyId})`);
 }
 
-function verifySkill(): void {
-  const bundle = JSON.parse(readFileSync(SIG_PATH, "utf8")) as {
+function verifyBundle(subjectName: string, files: Array<{ rel: string; full: string }>, sigPath: string): void {
+  const bundle = JSON.parse(readFileSync(sigPath, "utf8")) as {
     mediaType: string;
     verificationMaterial: { trustTier: string; publicKeyPem: string; keyId: string };
     dsseEnvelope: { payload: string; payloadType: string; signatures: Array<{ sig: string; keyid: string }> };
   };
 
   if (bundle.dsseEnvelope.payloadType !== PAYLOAD_TYPE) {
-    throw new Error(`Unexpected DSSE payloadType: ${bundle.dsseEnvelope.payloadType}`);
+    throw new Error(`[${subjectName}] Unexpected DSSE payloadType: ${bundle.dsseEnvelope.payloadType}`);
   }
   const payloadBytes = Buffer.from(bundle.dsseEnvelope.payload, "base64");
   const pae = dssePae(bundle.dsseEnvelope.payloadType, payloadBytes);
   const sigObj = bundle.dsseEnvelope.signatures[0];
-  if (!sigObj) throw new Error("Missing DSSE signature");
+  if (!sigObj) throw new Error(`[${subjectName}] Missing DSSE signature`);
 
   const verifier = createVerify("SHA256");
   verifier.update(pae);
   const sigValid = verifier.verify(bundle.verificationMaterial.publicKeyPem, Buffer.from(sigObj.sig, "base64"));
   if (!sigValid) {
-    throw new Error("DSSE ECDSA P-256 signature verification FAILED");
+    throw new Error(`[${subjectName}] DSSE ECDSA P-256 signature verification FAILED`);
   }
 
   const statement = JSON.parse(payloadBytes.toString("utf8")) as {
@@ -139,7 +190,7 @@ function verifySkill(): void {
     predicate: { resources: Array<{ name: string; digest: string }> };
   };
 
-  const current = computeFileDigests(SKILL_DIR);
+  const current = computeDigestsFromList(files);
   const expectedMap = new Map(statement.predicate.resources.map((r) => [r.name, r.digest]));
   const actualMap = new Map(current.resources.map((r) => [r.name, r.digest]));
 
@@ -151,7 +202,7 @@ function verifySkill(): void {
   }
   for (const name of actualMap.keys()) {
     if (!expectedMap.has(name)) {
-      mismatches.push(`Unattested extra file in skill directory: ${name}`);
+      mismatches.push(`Unattested extra file in bundle: ${name}`);
     }
   }
   if (statement.subject[0]?.digest.sha256 !== current.subjectDigest) {
@@ -159,19 +210,24 @@ function verifySkill(): void {
   }
 
   if (mismatches.length > 0) {
-    throw new Error(`Signature integrity mismatch:\n  - ${mismatches.join("\n  - ")}`);
+    throw new Error(`[${subjectName}] Signature integrity mismatch:\n  - ${mismatches.join("\n  - ")}`);
   }
 
   console.log(
-    `VERIFY SIG OK: ${current.resources.length} files verified (DSSE ECDSA P-256, trustTier=${bundle.verificationMaterial.trustTier}, subject=${current.subjectDigest.slice(0, 16)}...)`,
+    `VERIFY SIG OK [${subjectName}]: ${current.resources.length} files verified (DSSE ECDSA P-256, trustTier=${bundle.verificationMaterial.trustTier}, subject=${current.subjectDigest.slice(0, 16)}...)`,
   );
 }
 
 const mode = process.argv[2] ?? "--verify";
+const skillFiles = collectFilesRecursive(SKILL_DIR, SKILL_DIR, new Set(["skill.oms.sig"]));
+const pluginFiles = collectPluginRootFiles();
+
 if (mode === "--sign") {
-  signSkill();
+  signBundle("coldpin", skillFiles, SKILL_SIG_PATH, [".git", ".github", ".gitattributes", ".gitignore", "skill.oms.sig"]);
+  signBundle("coldpin-antigravity-plugin", pluginFiles, PLUGIN_SIG_PATH, [".git", ".github", "catalog/plugin.oms.sig"]);
 } else if (mode === "--verify") {
-  verifySkill();
+  verifyBundle("coldpin", skillFiles, SKILL_SIG_PATH);
+  verifyBundle("coldpin-antigravity-plugin", pluginFiles, PLUGIN_SIG_PATH);
 } else {
   console.error("Usage: node --no-warnings scripts/sign_and_verify_skill.ts [--sign | --verify]");
   process.exit(1);

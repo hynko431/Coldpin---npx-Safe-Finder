@@ -9,11 +9,16 @@
 /src/mcp/ @hynko431
 /lib/ @hynko431
 
-# Detection-as-Code rules, MCP schema pin, and SOC Sigma detections
+# Detection-as-Code catalog, MCP schema pin, SOC Sigma detections, and Antigravity plugin primitives
+/catalog/ @hynko431
 /rules/ @hynko431
+/agents/ @hynko431
+/hooks.json @hynko431
 
-# Canonical agent skill instructions, runtime contract, MCP manifests, and cryptographic signature
+# Canonical agent skill instructions, slash skills, runtime contract, MCP manifests, and cryptographic signatures
 /skills/coldpin/ @hynko431
+/skills/coldpin-audit/ @hynko431
+/skills/coldpin-incident/ @hynko431
 /mcp_config.json @hynko431
 /server.json @hynko431
 

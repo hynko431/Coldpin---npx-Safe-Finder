@@ -1028,10 +1028,12 @@ export async function runAuditManifestBatch(
         reasons.push(`${obs.code}: ${obs.detail}`);
       }
 
-      if (routing.route === "public") {
-        publicOsvTargets.push({ name: depName, ...(exactVer ? { version: exactVer } : {}) });
-      } else if (routing.route === "private") {
-        privateOsvTargets.push({ name: depName, ...(exactVer ? { version: exactVer } : {}) });
+      if (severityRank < 2) {
+        if (routing.route === "public") {
+          publicOsvTargets.push({ name: depName, ...(exactVer ? { version: exactVer } : {}) });
+        } else if (routing.route === "private") {
+          privateOsvTargets.push({ name: depName, ...(exactVer ? { version: exactVer } : {}) });
+        }
       }
     }
 

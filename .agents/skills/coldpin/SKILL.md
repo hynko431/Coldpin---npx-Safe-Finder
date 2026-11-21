@@ -10,7 +10,7 @@ description: >-
   escalating binary or obfuscated tarballs to REA.
 license: Apache-2.0
 metadata:
-  version: "1.4.0"
+  version: "1.5.0"
   author: "hynko431"
   tags:
     - npx
@@ -101,5 +101,10 @@ node --no-warnings lib/mcp.mjs   # or: coldpin mcp
 - [rea-integration-playbook.md](references/rea-integration-playbook.md) — Escalating obfuscated JS, native `.node`, WASM, or tarball drift to REA (`rea-agents`).
 - [enterprise-policy-schema.md](references/enterprise-policy-schema.md) — `.coldpin.policy.json`, `.npmrc` isolation, compliance clocks (CERT-In, DPDP, EU CRA, NIS2), and containment playbooks.
 - [evidence-card-spec.md](references/evidence-card-spec.md) — Verdict truth table, exit codes, SARIF 2.1.0, CycloneDX SBOM, and defanged IOC schema.
+- [aspect-discovery.md](references/aspect-discovery.md) — Package discovery, cooldowns, and 7-primitive slopsquat screening playbook.
+- [aspect-inspection.md](references/aspect-inspection.md) — Cold tarball malware triage, SHA-512 verification, and 3-tier tarball-to-Git parity playbook.
+- [aspect-manifest-confusion.md](references/aspect-manifest-confusion.md) — Workspace `package.json` batch screening and dependency confusion (`T1195.001`) playbook.
+- [aspect-forensics-rea.md](references/aspect-forensics-rea.md) — Patient-zero Git bisect, safe rollback anchor recovery, containment, and REA escalation playbook.
+- [aspect-compliance-audit.md](references/aspect-compliance-audit.md) — Policy posture, hash-chained `audit.jsonl` verification, and SBOM/SARIF compliance playbook.
 
 *Engineering guidance, not legal, medical or financial advice; confirm decisions with qualified counsel.*

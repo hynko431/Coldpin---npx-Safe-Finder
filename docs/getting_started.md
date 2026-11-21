@@ -21,7 +21,7 @@ node --no-warnings lib/mcp.mjs   # or: coldpin mcp
 ## Core Workflow Loop
 
 1. **Configure Enterprise Policy (Optional for Public Use, Required for Private Orgs):**
-   Copy [examples/.coldpin.policy.example.json](../examples/.coldpin.policy.example.json) and [examples/.npmrc.example](../examples/.npmrc.example) into your repository root declaring `private_scopes`, `private_prefixes`, `private_registries`, `cooldown_hours`, and CVE/KEV thresholds. In MCP mode, pin operator policy via `COLDPIN_POLICY_PATH` and allowed local roots via `COLDPIN_ALLOWED_ROOTS`. See [enterprise-policy-schema.md](../skills/coldpin/references/enterprise-policy-schema.md).
+   Copy [examples/.coldpin.policy.example.json](../examples/.coldpin.policy.example.json) and [examples/.npmrc.example](../examples/.npmrc.example) into your repository root declaring `private_scopes`, `private_prefixes`, `private_registries`, `cooldown_hours`, and CVE/KEV thresholds. In MCP mode, pin operator policy via `COLDPIN_POLICY_PATH` and allowed local roots via `COLDPIN_ALLOWED_ROOTS` (or use [examples/mcp_config.private-registry.example.json](../examples/mcp_config.private-registry.example.json) with Antigravity `variables`). See [enterprise-policy-schema.md](../skills/coldpin/references/enterprise-policy-schema.md).
 2. **Discover Candidates (`discover`):**
    ```sh
    node --no-warnings src/cli.ts discover "lint" --category cli --limit 10
@@ -53,7 +53,7 @@ node --no-warnings lib/mcp.mjs   # or: coldpin mcp
 
 ## Full Verification Suite
 
-Run all 9 automated gates (`28/28` tests, skill lint, hygiene, staleness, static eval, SkillSpector self-audit, 49-fixture/18-mutation benchmark verification, DSSE signature verification, and reproducible multi-host packaging) with one command:
+Run all 10 automated pipeline commands (`39/39` tests, 13-manifest & vertical-slice lint, hygiene, staleness, static eval, SkillSpector `SS-03`–`SS-15` self-audit, 49-fixture/35-mutation benchmark verification, dual DSSE signature verification, and reproducible multi-host packaging) with one command:
 
 ```sh
 npm run verify:all

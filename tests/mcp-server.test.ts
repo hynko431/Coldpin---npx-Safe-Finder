@@ -166,11 +166,11 @@ describe("Coldpin Local Zero-Dependency MCP Server & v1.4.0 Security Suite", () 
           result: { roots: [{ uri: pathToFileURL(tmpDir).href, name: "workspace" }] },
         });
 
-        // 5. tools/list schema budget <= 1,800 estimated tokens & matches rules/mcp-schema-pin.json
+        // 5. tools/list schema budget <= 1,800 estimated tokens & matches catalog/mcp-schema-pin.json
         const toolsRes = await h.request("tools/list", {}, 13);
         const toolsPayload = toolsRes["result"] as { tools: Array<{ name: string; inputSchema: Record<string, unknown> }> };
         assert.equal(toolsPayload.tools.length, 7);
-        const pinDisk = JSON.parse(readFileSync(resolve("rules/mcp-schema-pin.json"), "utf8")) as {
+        const pinDisk = JSON.parse(readFileSync(resolve("catalog/mcp-schema-pin.json"), "utf8")) as {
           catalog_sha256: string;
           estimated_tokens: number;
         };
@@ -635,7 +635,7 @@ describe("Coldpin Local Zero-Dependency MCP Server & v1.4.0 Security Suite", () 
       mkdirSync(installedDir, { recursive: true });
       cpSync(resolve("package.json"), join(installedDir, "package.json"));
       cpSync(resolve("lib"), join(installedDir, "lib"), { recursive: true });
-      cpSync(resolve("rules"), join(installedDir, "rules"), { recursive: true });
+      cpSync(resolve("catalog"), join(installedDir, "catalog"), { recursive: true });
 
       const verOut = execFileSync(process.execPath, ["--no-warnings", join(installedDir, "lib", "cli.mjs"), "--version"], {
         encoding: "utf8",
@@ -666,7 +666,7 @@ describe("Coldpin Local Zero-Dependency MCP Server & v1.4.0 Security Suite", () 
       const inspectJson = JSON.parse(inspectOut) as { verdict: string };
       assert.equal(inspectJson.verdict, "UNVERIFIABLE_UNKNOWN");
 
-      // Assert compiled lib/analysis/static-triage.mjs resolves rules/triage-rules.json with exact RULESET_SHA256 parity
+      // Assert compiled lib/analysis/static-triage.mjs resolves catalog/triage-rules.json with exact RULESET_SHA256 parity
       const compiledMod = (await import(pathToFileURL(join(installedDir, "lib", "analysis", "static-triage.mjs")).href)) as {
         RULESET_SHA256: string;
       };

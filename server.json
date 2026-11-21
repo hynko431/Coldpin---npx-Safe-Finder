@@ -3,7 +3,7 @@
   "name": "io.github.hynko431/coldpin",
   "title": "Coldpin",
   "description": "Zero-execution npx/npm security auditor: static taint, Git parity, clean anchors, batch triage.",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "repository": {
     "url": "https://github.com/hynko431/Coldpin-npx-Safe-Finder",
     "source": "github"
@@ -13,7 +13,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "coldpin",
-      "version": "1.4.0",
+      "version": "1.5.0",
       "runtimeHint": "npx",
       "runtimeArguments": [
         { "type": "positional", "value": "--ignore-scripts" }
@@ -28,7 +28,10 @@
         { "name": "COLDPIN_POLICY_PATH", "description": "Optional immutable .coldpin.policy.json path", "isRequired": false, "isSecret": false },
         { "name": "COLDPIN_ALLOWED_ROOTS", "description": "Optional OS-delimited local workspace roots", "isRequired": false, "isSecret": false },
         { "name": "COLDPIN_AUDIT_LOG", "description": "Optional hash-chained audit.jsonl path", "isRequired": false, "isSecret": false },
-        { "name": "COLDPIN_OFFLINE", "description": "Set to 1 to force offline fail-closed mode", "isRequired": false, "isSecret": false }
+        { "name": "COLDPIN_OFFLINE", "description": "Set to 1 to force offline fail-closed mode", "isRequired": false, "isSecret": false },
+        { "name": "COLDPIN_PRIVATE_SCOPES", "description": "Optional comma-separated internal @scope list routed strictly to private registry", "isRequired": false, "isSecret": false },
+        { "name": "COLDPIN_PRIVATE_REGISTRY_URL", "description": "Optional HTTPS private npm registry URL for COLDPIN_PRIVATE_SCOPES", "isRequired": false, "isSecret": false },
+        { "name": "COLDPIN_REGISTRY_TOKEN", "description": "Optional read-only bearer token sent strictly over HTTPS to COLDPIN_PRIVATE_REGISTRY_URL", "isRequired": false, "isSecret": true }
       ]
     }
   ]

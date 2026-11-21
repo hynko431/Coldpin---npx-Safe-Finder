@@ -8,6 +8,7 @@ import {
   loadMcpPolicy,
   loadNpmrc,
   probeHostCapabilitiesAsync,
+  sanitizeOperatorEnvValue,
 } from "../config/policy.ts";
 import {
   canonicalizeAuthorizedRoots,
@@ -66,13 +67,13 @@ export function loadOperatorConfigFromEnv(env: NodeJS.ProcessEnv = process.env):
   const rawRoots = env["COLDPIN_ALLOWED_ROOTS"] ?? "";
   const allowedRoots = rawRoots
     .split(delimiter)
-    .map((s) => s.trim())
-    .filter(Boolean);
+    .map((s) => sanitizeOperatorEnvValue(s))
+    .filter((s): s is string => Boolean(s));
   return {
-    policyPath: env["COLDPIN_POLICY_PATH"]?.trim() || undefined,
+    policyPath: sanitizeOperatorEnvValue(env["COLDPIN_POLICY_PATH"]),
     trustWorkspacePolicy: isTruthyEnv(env["COLDPIN_TRUST_WORKSPACE_POLICY"]),
-    auditLogPath: env["COLDPIN_AUDIT_LOG"]?.trim() || undefined,
-    cacheDir: env["COLDPIN_CACHE_DIR"]?.trim() || undefined,
+    auditLogPath: sanitizeOperatorEnvValue(env["COLDPIN_AUDIT_LOG"]),
+    cacheDir: sanitizeOperatorEnvValue(env["COLDPIN_CACHE_DIR"]),
     allowedRoots,
     forceOffline: isTruthyEnv(env["COLDPIN_OFFLINE"]),
     verbose: isTruthyEnv(env["COLDPIN_VERBOSE"]),

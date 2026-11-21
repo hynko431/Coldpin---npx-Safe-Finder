@@ -1,0 +1,47 @@
+{
+  "coldpin-npx-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "run_command|manage_task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --no-warnings ./lib/hook.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "coldpin-config-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content|write_file|edit_file|sed_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --no-warnings ./lib/hook.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "coldpin-delegation-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "define_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --no-warnings ./lib/hook.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

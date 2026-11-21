@@ -54,6 +54,93 @@ export interface RegistryRouteResult {
 
 const PUBLIC_NPM_HOSTS = new Set(["registry.npmjs.org", "registry.yarnpkg.com"]);
 
+/**
+ * Unanchored Antigravity placeholder detector (`[PLG-09]`):
+ * Rejects literal unexpanded placeholders such as `${COLDPIN_REGISTRY_TOKEN}`,
+ * `${PLUGIN_DATA}/cache`, or `Bearer ${TOKEN}` if a host enables a plugin before filling variables.
+ */
+export const UNEXPANDED_PLACEHOLDER_RE = /\$\{[A-Za-z0-9_]+\}/;
+
+export function hasUnexpandedPlaceholder(raw: string | undefined): boolean {
+  return typeof raw === "string" && UNEXPANDED_PLACEHOLDER_RE.test(raw);
+}
+
+export function sanitizeOperatorEnvValue(raw: string | undefined): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed || hasUnexpandedPlaceholder(trimmed)) return undefined;
+  return trimmed;
+}
+
+export function isValidPrivateRegistryEnvUrl(rawUrl: string): boolean {
+  if (hasUnexpandedPlaceholder(rawUrl)) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "https:") return false;
+  if (parsed.username || parsed.password) return false;
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host || PUBLIC_NPM_HOSTS.has(host)) return false;
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "metadata.google.internal" ||
+    host === "metadata.goog" ||
+    host === "169.254.169.254" ||
+    host === "100.100.100.200" ||
+    host === "fd00:ec2::254" ||
+    host === "::1" ||
+    host === "::" ||
+    host.startsWith("127.") ||
+    host.startsWith("0.") ||
+    host.startsWith("169.254.") ||
+    /^fe[89ab][0-9a-f]:/.test(host) ||
+    host.startsWith("::ffff:127.") ||
+    host.startsWith("::ffff:169.254.") ||
+    host.startsWith("::ffff:0.")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function applyPrivateRegistryEnvOverlay(
+  policy: PolicyConfig,
+  hasExplicitPolicyFile: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): PolicyConfig {
+  const rawScopes = sanitizeOperatorEnvValue(env["COLDPIN_PRIVATE_SCOPES"]);
+  const rawRegUrl = sanitizeOperatorEnvValue(env["COLDPIN_PRIVATE_REGISTRY_URL"]);
+  if (!rawScopes && !rawRegUrl) return policy;
+
+  const envScopes = rawScopes
+    ? rawScopes
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean)
+        .map((s) => (s.startsWith("@") ? s : `@${s}`))
+    : [];
+  const validRegUrl = rawRegUrl && isValidPrivateRegistryEnvUrl(rawRegUrl) ? rawRegUrl.replace(/\/+$/, "") : undefined;
+
+  const privateScopes = Array.from(new Set([...policy.private_scopes, ...envScopes]));
+  const privateRegistries: Record<string, string> = { ...policy.private_registries };
+  if (validRegUrl) {
+    for (const scope of envScopes) {
+      if (!hasExplicitPolicyFile || !privateRegistries[scope]) {
+        privateRegistries[scope] = validRegUrl;
+      }
+    }
+  }
+  return {
+    ...policy,
+    private_scopes: privateScopes,
+    private_registries: privateRegistries,
+  };
+}
+
 const SECRET_LIKE_PATTERNS: readonly RegExp[] = [
   /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,}\b/,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
@@ -262,7 +349,8 @@ export function loadPolicy(cwd: string, explicitPath?: string): {
     }
   }
 
-  const policy = parseRawPolicyObject(raw, DEFAULT_POLICY);
+  const parsedPolicy = parseRawPolicyObject(raw, DEFAULT_POLICY);
+  const policy = applyPrivateRegistryEnvOverlay(parsedPolicy, Boolean(explicitPath && loadedPath));
   const policy_sha256 = createHash("sha256").update(JSON.stringify(policy)).digest("hex");
   return { policy, policy_path: loadedPath, policy_sha256 };
 }
@@ -302,7 +390,10 @@ export function loadMcpPolicy(options: {
     }
   }
 
-  let effectivePolicy = basePolicy;
+  let effectivePolicy = applyPrivateRegistryEnvOverlay(
+    basePolicy,
+    Boolean(options.explicitPolicyPath && loadedPath),
+  );
   if (options.workspaceRoot) {
     const wsCandidates = [
       join(resolve(options.workspaceRoot), ".coldpin.policy.json"),
@@ -312,10 +403,10 @@ export function loadMcpPolicy(options: {
       if (existsSync(wp)) {
         try {
           const wsRaw = readPolicyJsonFile(wp);
-          const wsParsed = parseRawPolicyObject(wsRaw, basePolicy);
+          const wsParsed = parseRawPolicyObject(wsRaw, effectivePolicy);
           effectivePolicy = options.trustWorkspacePolicy
             ? wsParsed
-            : mergePolicyAdditiveTighteningOnly(basePolicy, wsParsed);
+            : mergePolicyAdditiveTighteningOnly(effectivePolicy, wsParsed);
           if (!loadedPath && options.trustWorkspacePolicy) loadedPath = wp;
         } catch {
           // Malformed workspace policy cannot crash or downgrade the operator policy
@@ -420,11 +511,16 @@ function normalizeHostPathKey(rawKey: string): string {
   return `${trimmed.slice(0, slashIdx).toLowerCase()}${trimmed.slice(slashIdx)}`;
 }
 
-export function resolveAuthTokenForUrl(registryUrl: string, npmrc: NpmrcConfig): string | undefined {
+export function resolveAuthTokenForUrl(
+  registryUrl: string,
+  npmrc: NpmrcConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
   try {
     const parsed = new URL(registryUrl);
-    // Security [MCP-09]: never resolve Bearer credentials for non-HTTPS URLs
+    // Security [MCP-09]: never resolve Bearer credentials for non-HTTPS URLs or public npm registries
     if (parsed.protocol !== "https:") return undefined;
+    if (PUBLIC_NPM_HOSTS.has(parsed.hostname.toLowerCase())) return undefined;
     const hostLower = parsed.host.toLowerCase();
     const pathClean = parsed.pathname.replace(/\/+$/, "");
     const hostAndPath = pathClean ? `${hostLower}${pathClean}` : hostLower;
@@ -433,7 +529,17 @@ export function resolveAuthTokenForUrl(registryUrl: string, npmrc: NpmrcConfig):
       if (!kNorm) continue;
       // Security [MCP-09]: exact host or '/'-segment boundary match (prevents corp.local.evil.com matching corp.local)
       if (hostAndPath === kNorm || hostAndPath.startsWith(`${kNorm}/`)) {
-        return process.env[envVar];
+        return sanitizeOperatorEnvValue(env[envVar]);
+      }
+    }
+    // Optional enterprise Antigravity variables overlay (`[PLG-09]`): exact HTTPS host+path match only
+    const envRegUrl = sanitizeOperatorEnvValue(env["COLDPIN_PRIVATE_REGISTRY_URL"]);
+    const envToken = sanitizeOperatorEnvValue(env["COLDPIN_REGISTRY_TOKEN"]);
+    if (envRegUrl && envToken && isValidPrivateRegistryEnvUrl(envRegUrl)) {
+      const envParsed = new URL(envRegUrl);
+      const envHostPath = `${envParsed.host.toLowerCase()}${envParsed.pathname.replace(/\/+$/, "")}`;
+      if (hostAndPath === envHostPath || hostAndPath.startsWith(`${envHostPath}/`)) {
+        return envToken;
       }
     }
   } catch {

@@ -1,13 +1,14 @@
 {
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "coldpin",
   "displayName": "Coldpin",
-  "version": "1.4.0",
-  "description": "Inspect npx packages cold in memory, verify tarball-to-source parity, and pin verified pre-compromise releases or clean alternatives with zero execution.",
+  "version": "1.5.0",
+  "description": "Inspect npx packages cold in memory, verify tarball-to-source parity, and pin verified clean releases with zero execution.",
   "author": {
-    "name": "hynko431"
+    "name": "hynko431",
+    "url": "https://github.com/hynko431"
   },
   "license": "Apache-2.0",
-  "category": "Security",
   "homepage": "https://github.com/hynko431/Coldpin-npx-Safe-Finder#readme",
   "repository": "https://github.com/hynko431/Coldpin-npx-Safe-Finder",
   "keywords": [

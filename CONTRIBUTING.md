@@ -8,9 +8,9 @@ Thank you for contributing to `coldpin` (Coldpin). This project follows strict s
 
 1. **Zero External Runtime Dependencies:** `src/` must run natively on Node.js `>= 24.0.0` (`node:sqlite`, `node:zlib`, `node:crypto`, `node:module`, `fetch`) using `erasableSyntaxOnly` TypeScript. Governance scripts under `scripts/` must use Python `>= 3.11` stdlib or Node 24 stdlib only. Keep `package.json` `"files"` restricted to vetted runtime and documentation paths.
 2. **One Canonical Skill Source:** Edit skill prose only under `skills/coldpin/`. Never hand-edit `.agents/skills/coldpin/`; regenerate it via `npm run pack:plugin`.
-3. **Version Parity & Compiled `lib/` Parity:** Keep version numbers synchronized across `src/types.ts` (`ENGINE_VERSION`), `package.json`, `plugin.json`, `server.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`, `rules/triage-rules.json`, `rules/mcp-schema-pin.json`, `skills/coldpin/SKILL.md`, and `skills/coldpin/skill-card.md` (enforced by `scripts/lint_skill.py`). Re-run `npm run build` whenever `src/` changes so committed `lib/**/*.mjs` matches `src/**/*.ts` 1:1.
+3. **Version Parity & Compiled `lib/` Parity:** Keep version numbers synchronized across all 13 files: `src/types.ts` (`ENGINE_VERSION`), `package.json`, `plugin.json`, `server.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`, `catalog/triage-rules.json`, `catalog/mcp-schema-pin.json`, `skills/coldpin/SKILL.md`, `skills/coldpin/skill-card.md`, `skills/coldpin-audit/SKILL.md`, and `skills/coldpin-incident/SKILL.md` (enforced by `scripts/lint_skill.py`). Re-run `npm run build` whenever `src/` changes so committed `lib/**/*.mjs` matches `src/**/*.ts` 1:1.
 4. **Rule Lifecycle Hygiene:** Every new static detection rule must:
-   - Be registered in `rules/triage-rules.json` with severity, owner, and MITRE ATT&CK/ATLAS mapping.
+   - Be registered in `catalog/triage-rules.json` with severity, owner, and MITRE ATT&CK/ATLAS mapping.
    - Include both a positive adversarial fixture AND a negative benign fixture in `tests/benchmark-corpus.ts`.
    - Pass mutation verification proving the assertion turns red when the attack is introduced.
 5. **No Fabricated Evidence:** Never fabricate Tier 3 multi-agent benchmark scores or overclaim static coverage.
@@ -18,7 +18,7 @@ Thank you for contributing to `coldpin` (Coldpin). This project follows strict s
 
 ## Mandatory Pre-PR Verification
 
-Refresh measured and signed artifacts in exact order whenever `src/`, `rules/`, `skills/`, or corpus files change, then run the full verification pipeline:
+Refresh measured and signed artifacts in exact order whenever `src/`, `catalog/`, `rules/`, `skills/`, or corpus files change, then run the full verification pipeline:
 
 ```sh
 npm run build

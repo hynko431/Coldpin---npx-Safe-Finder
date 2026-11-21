@@ -579,7 +579,7 @@ describe("Enterprise Hardening, Evasion Closure, Network Isolation, Concurrency 
       assert.equal(pkgJson.version, ENGINE_VERSION);
       assert.ok(Array.isArray(pkgJson.files) && pkgJson.files.includes("src/") && !pkgJson.files.some((f) => f.startsWith("tests") || f.startsWith(".github")));
       const expectedRulesetHash = createHash("sha256")
-        .update(`v${ENGINE_VERSION}|${readFileSync(resolve("rules/triage-rules.json"), "utf8")}`)
+        .update(`v${ENGINE_VERSION}|${readFileSync(resolve("catalog/triage-rules.json"), "utf8")}`)
         .digest("hex");
       assert.equal(RULESET_SHA256, expectedRulesetHash);
     } finally {

@@ -8,9 +8,10 @@ Checks:
 4. Relative Markdown link resolution inside skills/coldpin/.
 5. Reference files carry `last_reviewed:` and `review_by:` metadata.
 6. Alignment between CLI verbs in runtime-contract.yaml and SKILL.md.
-7. Cross-harness 10-manifest version & MCP schema/config parity (`plugin.json`, `package.json`,
+7. Cross-harness 13-manifest version & MCP schema/config parity (`plugin.json`, `package.json`,
    `server.json`, `mcp_config.json`, `.claude-plugin/{plugin,marketplace}.json`, `.codex-plugin/plugin.json`,
-   `src/types.ts`, `rules/triage-rules.json`, `rules/mcp-schema-pin.json`, `SKILL.md`, `skill-card.md`).
+   `src/types.ts`, `catalog/triage-rules.json`, `catalog/mcp-schema-pin.json`, `skills/coldpin/{SKILL,skill-card}.md`,
+   `skills/coldpin-{audit,incident}/SKILL.md`), plus Antigravity `rules/`, `agents/`, and `hooks.json` schema checks.
 """
 
 import json
@@ -123,8 +124,18 @@ def main() -> int:
         root_ver = root_m.get("version")
         if "mcpServers" in root_m:
             errors.append("Root plugin.json must NOT inline 'mcpServers' (use root mcp_config.json for agy --strict)")
-        if "$schema" in root_m:
-            errors.append("Root plugin.json must omit '$schema' for cross-harness compatibility")
+        if root_m.get("$schema") != "https://antigravity.google/schemas/v1/plugin.json":
+            errors.append("Root plugin.json must set '$schema' to 'https://antigravity.google/schemas/v1/plugin.json'")
+        allowed_root_props = {
+            "$schema", "name", "displayName", "version", "description", "author",
+            "homepage", "repository", "license", "keywords", "logo", "suggestedPrompts", "extensions",
+        }
+        extra_props = sorted(set(root_m.keys()) - allowed_root_props)
+        if extra_props:
+            errors.append(f"Root plugin.json contains non-schema properties (additionalProperties: false): {extra_props}")
+        author_obj = root_m.get("author")
+        if isinstance(author_obj, dict) and not str(author_obj.get("url", "")).startswith("https://"):
+            errors.append("Root plugin.json author.url must be an https:// URL")
         logo = root_m.get("logo")
         if isinstance(logo, str) and not (ROOT / logo).exists():
             errors.append(f"Root plugin.json logo missing on disk: {logo}")
@@ -230,32 +241,162 @@ def main() -> int:
             if not eng_m or eng_m.group(1) != root_ver:
                 errors.append(f"Version drift in src/types.ts ENGINE_VERSION: {eng_m.group(1) if eng_m else None} != {root_ver}")
 
-        mcp_pin = ROOT / "rules" / "mcp-schema-pin.json"
+        mcp_pin = ROOT / "catalog" / "mcp-schema-pin.json"
         if not mcp_pin.exists():
-            errors.append("Missing rules/mcp-schema-pin.json")
+            errors.append("Missing catalog/mcp-schema-pin.json")
         else:
             pin_doc = json.loads(mcp_pin.read_text(encoding="utf-8"))
             if pin_doc.get("engine_version") != root_ver:
-                errors.append(f"Version drift in rules/mcp-schema-pin.json: {pin_doc.get('engine_version')} != {root_ver}")
+                errors.append(f"Version drift in catalog/mcp-schema-pin.json: {pin_doc.get('engine_version')} != {root_ver}")
 
-    # Validate rules/triage-rules.json catalog
-    rules_manifest = ROOT / "rules" / "triage-rules.json"
+    # Validate catalog/triage-rules.json catalog
+    rules_manifest = ROOT / "catalog" / "triage-rules.json"
     if not rules_manifest.exists():
-        errors.append("Missing rules/triage-rules.json detection-as-code catalog")
+        errors.append("Missing catalog/triage-rules.json detection-as-code catalog")
     else:
         try:
             rm = json.loads(rules_manifest.read_text(encoding="utf-8"))
             if not isinstance(rm.get("rules"), list) or len(rm["rules"]) < 10:
-                errors.append("rules/triage-rules.json must declare >= 10 structured rules")
+                errors.append("catalog/triage-rules.json must declare >= 10 structured rules")
             if root_manifest_path.exists():
                 root_ver = json.loads(root_manifest_path.read_text(encoding="utf-8")).get("version")
                 if rm.get("ruleset_version") != root_ver:
-                    errors.append(f"Version drift in rules/triage-rules.json: {rm.get('ruleset_version')} != {root_ver}")
+                    errors.append(f"Version drift in catalog/triage-rules.json: {rm.get('ruleset_version')} != {root_ver}")
         except json.JSONDecodeError as exc:
-            errors.append(f"Invalid JSON in rules/triage-rules.json: {exc}")
+            errors.append(f"Invalid JSON in catalog/triage-rules.json: {exc}")
 
-    # Hidden/bidi Unicode & shift-left secret scan across skills/coldpin/
-    for p in sorted(SKILL_DIR.rglob("*")):
+    # Validate Antigravity-only slash skills (`skills/coldpin-audit`, `skills/coldpin-incident`)
+    root_ver_for_extra = (
+        json.loads(root_manifest_path.read_text(encoding="utf-8")).get("version")
+        if root_manifest_path.exists()
+        else None
+    )
+    for extra_skill_name in ("coldpin-audit", "coldpin-incident"):
+        extra_skill = ROOT / "skills" / extra_skill_name / "SKILL.md"
+        if not extra_skill.exists():
+            errors.append(f"Missing Antigravity slash skill: skills/{extra_skill_name}/SKILL.md")
+            continue
+        es_raw = extra_skill.read_bytes()
+        es_txt = es_raw.decode("utf-8")
+        if len(es_txt.splitlines()) > MAX_LINES or len(es_raw) > MAX_BYTES:
+            errors.append(f"skills/{extra_skill_name}/SKILL.md exceeds Antigravity line/byte budget")
+        es_fm = re.match(r"^---\r?\n(.*?)\r?\n---", es_txt, re.S)
+        if not es_fm:
+            errors.append(f"skills/{extra_skill_name}/SKILL.md missing YAML frontmatter")
+        else:
+            es_ver = extract_skill_md_version(es_fm.group(1))
+            if root_ver_for_extra and es_ver != root_ver_for_extra:
+                errors.append(f"Version drift in skills/{extra_skill_name}/SKILL.md: {es_ver} != {root_ver_for_extra}")
+
+    # Validate rules/ (flat pure Markdown rules only)
+    rules_dir = ROOT / "rules"
+    if not rules_dir.is_dir():
+        errors.append("Missing rules/ directory for Antigravity Markdown rules")
+    else:
+        for entry in sorted(rules_dir.iterdir()):
+            if entry.is_dir() or entry.suffix.lower() != ".md":
+                errors.append(f"Non-Markdown entry in rules/ (scanner data belongs in catalog/): rules/{entry.name}")
+                continue
+            r_raw = entry.read_bytes()
+            r_txt = r_raw.decode("utf-8")
+            if re.search(r"@\[[^\]]+\]\([^)]+\)", r_txt):
+                errors.append(f"Disallowed @[label](path) file include in rules/{entry.name}")
+            if entry.name in ("AGENTS.md", "GEMINI.md"):
+                if r_txt.startswith("---"):
+                    errors.append(f"rules/{entry.name} must NOT contain YAML frontmatter")
+                if len(r_raw) > 1800:
+                    errors.append(f"rules/{entry.name} exceeds 1,800-byte budget ({len(r_raw)} bytes)")
+            else:
+                rfm = re.match(r"^---\r?\n(.*?)\r?\n---", r_txt, re.S)
+                if not rfm:
+                    errors.append(f"rules/{entry.name} missing required YAML frontmatter")
+                else:
+                    fm_body = rfm.group(1)
+                    tm = re.search(r"^trigger:\s*(\S+)", fm_body, re.M)
+                    if not tm or tm.group(1) not in ("always_on", "model_decision", "glob", "manual"):
+                        errors.append(f"rules/{entry.name} missing valid trigger")
+                    elif tm.group(1) == "glob":
+                        gm = re.search(r'^globs:\s*"([^"]+)"', fm_body, re.M)
+                        if not gm:
+                            errors.append(f"rules/{entry.name} with trigger: glob must use quoted comma-separated globs string")
+
+    # Validate agents/ (7 read-only aspect agents with canonical tool allowlist)
+    agents_dir = ROOT / "agents"
+    allowed_agent_tools = {"view_file", "grep_search", "find_by_name", "list_dir", "send_message", "invoke_subagent"}
+    if not agents_dir.is_dir():
+        errors.append("Missing agents/ directory")
+    else:
+        agent_files = sorted(agents_dir.glob("*.md"))
+        if len(agent_files) != 7:
+            errors.append(f"Expected 7 agents in agents/, found {len(agent_files)}")
+        for af in agent_files:
+            atxt = af.read_text(encoding="utf-8")
+            afm = re.match(r"^---\r?\n(.*?)\r?\n---", atxt, re.S)
+            if not afm:
+                errors.append(f"agents/{af.name} missing YAML frontmatter")
+                continue
+            fm = afm.group(1)
+            if not re.search(r'^commandExecutionPolicy:\s*"?off"?\s*$', fm, re.M):
+                errors.append(f"agents/{af.name} must set commandExecutionPolicy: \"off\"")
+            is_main = bool(re.search(r"^mainAgent:\s*true\s*$", fm, re.M))
+            if not is_main and not re.search(r"^inheritCustomizations:\s*false\s*$", fm, re.M):
+                errors.append(f"Background subagent agents/{af.name} must set inheritCustomizations: false")
+            if re.search(r"^mcpServers:\s*\n\s*-\s*[\"']?[A-Za-z0-9_-]+[\"']?\s*$", fm, re.M):
+                errors.append(f"agents/{af.name} must not use string-array mcpServers")
+            # Parse tools block
+            tools_m = re.search(r"^tools:\s*\n((?:\s+-\s+\S+\s*\n?)+)", fm, re.M)
+            if not tools_m:
+                errors.append(f"agents/{af.name} missing explicit read-only tools allowlist")
+            else:
+                tools_list = [ln.strip().lstrip("-").strip().strip("\"'") for ln in tools_m.group(1).splitlines() if ln.strip()]
+                for t in tools_list:
+                    if t not in allowed_agent_tools:
+                        errors.append(f"agents/{af.name} uses disallowed/non-canonical tool '{t}'")
+                    if t == "invoke_subagent" and not is_main:
+                        errors.append(f"Background leaf subagent agents/{af.name} must not grant invoke_subagent")
+            # Parse skills block
+            skills_m = re.search(r"^skills:\s*\n((?:\s+-\s+\S+\s*\n?)+)", fm, re.M)
+            if not skills_m:
+                errors.append(f"agents/{af.name} missing skills list")
+            else:
+                for ln in skills_m.group(1).splitlines():
+                    sp = ln.strip().lstrip("-").strip().strip("\"'")
+                    if sp and not (ROOT / sp / "SKILL.md").exists():
+                        errors.append(f"agents/{af.name} references missing skill '{sp}/SKILL.md'")
+
+    # Validate root hooks.json (3 named hook groups, all enabled: true)
+    hooks_path = ROOT / "hooks.json"
+    if not hooks_path.exists():
+        errors.append("Missing root hooks.json")
+    else:
+        try:
+            hdoc = json.loads(hooks_path.read_text(encoding="utf-8"))
+            if not isinstance(hdoc, dict) or len(hdoc) != 3:
+                errors.append(f"hooks.json must declare 3 named hook groups (found {len(hdoc) if isinstance(hdoc, dict) else 'non-object'})")
+            else:
+                for gname, gobj in hdoc.items():
+                    if not isinstance(gobj, dict) or gobj.get("enabled") is not True:
+                        errors.append(f"hooks.json group '{gname}' must have enabled: true")
+                    for entry in gobj.get("PreToolUse", []):
+                        for h in entry.get("hooks", []):
+                            cmd = h.get("command", "")
+                            if cmd != "node --no-warnings ./lib/hook.mjs":
+                                errors.append(f"hooks.json '{gname}' unexpected command: {cmd!r}")
+                            if "${PLUGIN_ROOT}" in cmd:
+                                errors.append(f"hooks.json '{gname}' must not interpolate ${{PLUGIN_ROOT}} in command")
+                            if not isinstance(h.get("timeout"), int) or h.get("timeout") <= 0:
+                                errors.append(f"hooks.json '{gname}' missing positive integer timeout")
+        except json.JSONDecodeError as exc:
+            errors.append(f"Invalid JSON in hooks.json: {exc}")
+
+    # Hidden/bidi Unicode & shift-left secret scan across skills/, rules/, agents/, hooks.json
+    scan_paths: list[Path] = []
+    for base_dir in (SKILL_DIR, ROOT / "skills" / "coldpin-audit", ROOT / "skills" / "coldpin-incident", ROOT / "rules", ROOT / "agents"):
+        if base_dir.is_dir():
+            scan_paths.extend(sorted(base_dir.rglob("*")))
+    if hooks_path.exists():
+        scan_paths.append(hooks_path)
+    for p in scan_paths:
         if not p.is_file() or p.suffix.lower() in BINARY_EXTS:
             continue
         rel = p.relative_to(ROOT).as_posix()
@@ -277,7 +418,7 @@ def main() -> int:
             print(f"  - {e}", file=sys.stderr)
         return 1
 
-    print("LINT OK: skill manifest, MCP configs, 10-manifest parity, links, contract alignment, Unicode hygiene, and secret scan passed.")
+    print("LINT OK: skill manifest, MCP configs, 13-manifest parity, rules/agents/hooks schema, links, contract alignment, Unicode hygiene, and secret scan passed.")
     return 0
 
 

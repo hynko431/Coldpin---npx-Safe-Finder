@@ -89,6 +89,8 @@ def resolve_md_ref(source_file: Path, ref: str) -> bool:
         "SECURITY.md",
         "CONTRIBUTING.md",
         "ACCESSIBILITY.md",
+        "AGENTS.md",
+        "GEMINI.md",
     ):
         return True
     candidates = [
@@ -96,6 +98,8 @@ def resolve_md_ref(source_file: Path, ref: str) -> bool:
         SKILL_DIR / ref,
         SKILL_DIR / "references" / ref,
         ROOT / ref,
+        ROOT / "rules" / ref,
+        ROOT / "agents" / ref,
         ROOT / "docs" / ref,
         ROOT / "docs" / "designs" / ref,
     ]
@@ -130,6 +134,21 @@ def main() -> int:
     ]
     for ref in sorted((SKILL_DIR / "references").glob("*.md")):
         files_to_check.append((ref, True))
+    for extra_skill in ("coldpin-audit", "coldpin-incident"):
+        sp = ROOT / "skills" / extra_skill / "SKILL.md"
+        if sp.exists():
+            files_to_check.append((sp, False))
+    for extra_dir in (ROOT / "rules", ROOT / "agents"):
+        if extra_dir.is_dir():
+            for md_f in sorted(extra_dir.glob("*.md")):
+                files_to_check.append((md_f, False))
+    hooks_json = ROOT / "hooks.json"
+    if hooks_json.exists():
+        files_to_check.append((hooks_json, False))
+    examples_dir = ROOT / "examples"
+    if examples_dir.is_dir():
+        for ex_f in sorted(examples_dir.glob("*.json")):
+            files_to_check.append((ex_f, False))
     gh_pr_tpl = ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
     if gh_pr_tpl.exists():
         files_to_check.append((gh_pr_tpl, False))

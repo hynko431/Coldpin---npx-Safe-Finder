@@ -30,19 +30,20 @@ node --no-warnings lib/cli.mjs --help
 node --no-warnings lib/mcp.mjs        # Start local stdio MCP server (or: coldpin mcp)
 ```
 
-Or install via npm (`npx --ignore-scripts coldpin@1.4.0 mcp`) or download a checksum-verified host bundle (`coldpin-{antigravity,claude,openai}.zip` + `SHA256SUMS.txt`) from [GitHub Releases](https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases).
+Or install via npm (`npx --ignore-scripts coldpin@1.5.0 mcp`) or download a checksum-verified host bundle (`coldpin-{antigravity,claude,openai}.zip` + `SHA256SUMS.txt`) from [GitHub Releases](https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases).
 
-### Antigravity (CLI / Workspace / App / IDEs)
+### Antigravity (CLI / Workspace / App / IDEs — requires `agy >= v1.5.13`)
 
-Build (or download from [GitHub Releases](https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases)) the clean allowlisted Antigravity bundle, extract it to a directory, and install with the Antigravity CLI (loads `skills/coldpin/` and `mcp_config.json` with `${PLUGIN_DATA}` cache isolation):
+Build (or download from [GitHub Releases](https://github.com/hynko431/Coldpin-npx-Safe-Finder/releases)) the clean allowlisted Antigravity plugin bundle — shipping all 5 native primitives (`rules/`: 3 Markdown rules, `agents/`: 7 strictly read-only aspect agents, `skills/`: 3 skills including `/coldpin-audit` and `/coldpin-incident`, `hooks.json`: 3 default-enabled fail-safe `PreToolUse` groups, and `mcp_config.json`: local zero-variable `stdio` with 7 eager tools and `${PLUGIN_DATA}` cache isolation):
 
 ```sh
 python scripts/pack_plugin.py --target antigravity --verify
 python -m zipfile -e dist/coldpin-antigravity.zip ./coldpin-antigravity
 agy plugin install ./coldpin-antigravity
+agy --agent coldpin-auditor
 ```
 
-For workspace-scoped discovery inside this repository, run `python scripts/pack_plugin.py --verify --sync-workspace` (syncs `.agents/skills/coldpin/`). For manual global installation into `~/.gemini/config/plugins/coldpin/`, see [Harnesses](docs/harnesses.md#antigravity-app-and-antigravity-for-ides).
+For enterprise private registries, copy [mcp_config.private-registry.example.json](examples/mcp_config.private-registry.example.json) as an opt-in Antigravity `variables` overlay. For workspace-scoped discovery inside this repository, run `python scripts/pack_plugin.py --verify --sync-workspace` (syncs `.agents/skills/coldpin/`). For manual global installation into `~/.gemini/config/plugins/coldpin/`, see [Harnesses](docs/harnesses.md#antigravity-app-and-antigravity-for-ides).
 
 ### Claude Code, Codex CLI & Official MCP Registry
 
@@ -97,7 +98,8 @@ node --no-warnings lib/cli.mjs audit-verify ./audit.jsonl
   <thead><tr><th align="left">Layer</th><th align="left">Trust Boundary</th><th align="left">Responsibility</th></tr></thead>
   <tbody>
     <tr valign="top"><td><strong>Deterministic CLI &amp; Local MCP (<code>lib/</code>)</strong></td><td>Zero execution; in-memory archive parsing; stdio-only (0 listening sockets); operator-only control plane</td><td>Computes 4-state verdict, SHA-512 verification, AST taint, parity, defanged IOCs, SARIF 2.1.0, CycloneDX 1.5 SBOM, and summary-first MCP paging.</td></tr>
-    <tr valign="top"><td><strong>Agent Skill (<code>skills/coldpin/SKILL.md</code>)</strong></td><td>Untrusted package prose isolated as data; fails closed on unknowns</td><td>Orchestrates the 7 MCP tools / 6 CLI verbs, enforces private-scope rules, and routes obfuscated/native artifacts to pre-installed REA.</td></tr>
+    <tr valign="top"><td><strong>Native Guardrails (<code>rules/</code>, <code>agents/</code>, <code>hooks.json</code>)</strong></td><td>Read-only aspect subagents (<code>commandExecutionPolicy: "off"</code>); fail-safe ES2020 <code>PreToolUse</code> hook (exit <code>0</code>, zero auto-approval)</td><td>Routes 6 security aspects across isolated subagents, blocks unvetted/evasive <code>npx</code> commands, and forces confirmation on pinned runs, config edits, and writable <code>define_subagent</code> requests.</td></tr>
+    <tr valign="top"><td><strong>Agent Skills (<code>skills/</code>)</strong></td><td>Untrusted package prose isolated as data; fails closed on unknowns</td><td>Orchestrates the 7 MCP tools / 6 CLI verbs with 5 modular aspect playbooks plus Antigravity <code>/coldpin-audit</code> and <code>/coldpin-incident</code> workflows.</td></tr>
     <tr valign="top"><td><strong>You</strong></td><td>Human approval gate before any host execution</td><td>Review observations, inferences, unknowns, and transitive caveats before running any pinned command.</td></tr>
   </tbody>
 </table>
@@ -126,7 +128,7 @@ Static triage does not replace runtime isolation or human judgment. See [FAQ](do
 - [Privacy & data handling](docs/privacy.md): exact network egress, private-scope non-leakage, and credential boundaries.
 - [FAQ](docs/faq.md): trade-offs, false-positive controls, stock `npx` limits, and REA optionality.
 - [Design specification](docs/designs/coldpin.md) & [Design sitemap](docs/designs/SITEMAP.md): locked architecture and design records.
-- [Testing & verification](TESTING.md): deterministic unit/E2E/MCP tests, 12 automated verification gates, cross-platform CI matrix, SkillSpector self-audit, and reproducible build gates.
+- [Testing & verification](TESTING.md): deterministic unit/E2E/MCP/hook tests, 14 automated verification gates, cross-platform CI matrix, SkillSpector self-audit (`SS-03`–`SS-15`), and reproducible build gates.
 - [Benchmarks](skills/coldpin/BENCHMARK.md) & [Skill Card](skills/coldpin/skill-card.md): real executed Tier 1–2 measurements (`49`-fixture corpus, mutation proofs) and honest Tier 3 status.
 - [Fact Ledger](docs/fact-ledger.md), [Maintenance Cadence](MAINTENANCE.md), & [Changelog](CHANGELOG.md).
 

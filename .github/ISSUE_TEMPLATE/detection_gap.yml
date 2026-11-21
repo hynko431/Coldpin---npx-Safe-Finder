@@ -34,7 +34,7 @@ body:
     id: verdict_delta
     attributes:
       label: Expected vs. Observed Verdict & Rule Code
-      description: State the expected `TrustVerdict` and rule code (from `rules/triage-rules.json`) versus what `coldpin inspect --json` produced.
+      description: State the expected `TrustVerdict` and rule code (from `catalog/triage-rules.json`) versus what `coldpin inspect --json` produced.
     validations:
       required: true
 

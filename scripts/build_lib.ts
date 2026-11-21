@@ -17,7 +17,7 @@ import { dirname, join, relative, resolve } from "node:path";
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SRC_DIR = join(REPO_ROOT, "src");
 const LIB_DIR = join(REPO_ROOT, "lib");
-const PIN_PATH = join(REPO_ROOT, "rules", "mcp-schema-pin.json");
+const PIN_PATH = join(REPO_ROOT, "catalog", "mcp-schema-pin.json");
 
 function walkFiles(dir: string, suffix: string, out: string[] = []): string[] {
   if (!existsSync(dir)) return out;
@@ -154,7 +154,7 @@ async function main(): Promise<void> {
     const pin = computeMcpSchemaPin();
     writeFileSync(PIN_PATH, `${JSON.stringify(pin, null, 2)}\n`, "utf8");
     process.stdout.write(
-      `Updated rules/mcp-schema-pin.json (tools=${pin.tools_count}, chars=${pin.tools_list_chars}, est_tokens=${pin.estimated_tokens}, catalog_sha256=${pin.catalog_sha256.slice(0, 16)}...)\n`,
+      `Updated catalog/mcp-schema-pin.json (tools=${pin.tools_count}, chars=${pin.tools_list_chars}, est_tokens=${pin.estimated_tokens}, catalog_sha256=${pin.catalog_sha256.slice(0, 16)}...)\n`,
     );
   }
 

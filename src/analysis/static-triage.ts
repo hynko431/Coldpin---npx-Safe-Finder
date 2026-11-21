@@ -52,8 +52,8 @@ export function isSafeNpmBinName(bin: string): boolean {
 
 function computeRulesetSha256(): string {
   const candidates = [
-    resolve(import.meta.dirname, "..", "..", "rules", "triage-rules.json"),
-    resolve(import.meta.dirname, "..", "..", "..", "rules", "triage-rules.json"),
+    resolve(import.meta.dirname, "..", "..", "catalog", "triage-rules.json"),
+    resolve(import.meta.dirname, "..", "..", "..", "catalog", "triage-rules.json"),
   ];
   const manifestPath = candidates.find((p) => existsSync(p));
   const raw = manifestPath

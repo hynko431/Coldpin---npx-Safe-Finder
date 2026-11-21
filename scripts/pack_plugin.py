@@ -2,13 +2,14 @@
 """Reproducible multi-harness allowlist packager for Coldpin (Google EGM pattern).
 
 Builds host-targeted runtime bundles (`antigravity`, `claude`, `openai`, or `all`) from one
-canonical source tree (`skills/coldpin/` + `lib/` + `src/` + `rules/` + `examples/` + docs):
+canonical source tree (`skills/coldpin/` + `lib/` + `src/` + `catalog/` + `examples/` + docs):
 - Explicit allowlist only (excludes .git, node_modules, tests, caches, audit logs).
-- Rejects symlinks, hooks, and paths escaping the repository root.
+- Rejects symlinks, manifest auto-approval hooks, and paths escaping the repository root.
 - Validates manifest asset references, MCP `${PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` targets,
   and EVERY relative Markdown / image link inside each generated archive.
 - Supports `--no-overwrite` (EGM overwrite-refusal guard) for safe CI/release staging.
-- Sorts archive entries and uses fixed timestamps (2026-01-01 00:00:00 UTC) and modes (0644)
+- Sorts archive entries and uses fixed timestamps (2026-01-01 00:00:00 UTC) and POSIX modes
+  (`create_system=3`, `0100755` for `lib/{cli,mcp,hook}.mjs`, `0100644` otherwise)
   for byte-for-byte reproducibility under the same toolchain.
 - Syncs `.agents/skills/coldpin/` when `--sync-workspace` is passed.
 """
@@ -47,9 +48,9 @@ SHARED_GLOBS = [
     "docs/verification/*.md",
     "examples/*",
     "examples/.*",
-    "rules/triage-rules.json",
-    "rules/mcp-schema-pin.json",
-    "rules/sigma/*.yml",
+    "catalog/triage-rules.json",
+    "catalog/mcp-schema-pin.json",
+    "catalog/sigma/*.yml",
     "lib/**/*.mjs",
     "src/**/*.ts",
     "skills/coldpin/SKILL.md",
@@ -65,9 +66,22 @@ SHARED_GLOBS = [
 ]
 
 HOST_GLOBS = {
-    "antigravity": [],
+    "antigravity": [
+        "rules/*.md",
+        "agents/*.md",
+        "hooks.json",
+        "skills/coldpin-audit/SKILL.md",
+        "skills/coldpin-incident/SKILL.md",
+        "catalog/plugin.oms.sig",
+    ],
     "claude": [".claude-plugin/plugin.json", ".claude-plugin/marketplace.json"],
     "openai": [".codex-plugin/plugin.json", ".agents/plugins/marketplace.json"],
+}
+
+EXEC_ARCHIVE_PATHS = {
+    "lib/cli.mjs",
+    "lib/mcp.mjs",
+    "lib/hook.mjs",
 }
 
 REQUIRED_ARCHIVE_PATHS = {
@@ -80,10 +94,12 @@ REQUIRED_ARCHIVE_PATHS = {
     "assets/icon.svg",
     "lib/cli.mjs",
     "lib/mcp.mjs",
+    "lib/hook.mjs",
     "src/cli.ts",
     "src/mcp.ts",
-    "rules/triage-rules.json",
-    "rules/mcp-schema-pin.json",
+    "src/hook.ts",
+    "catalog/triage-rules.json",
+    "catalog/mcp-schema-pin.json",
     "skills/coldpin/SKILL.md",
     "skills/coldpin/assets/runtime-contract.yaml",
     "skills/coldpin/skill.oms.sig",
@@ -148,10 +164,25 @@ def validate_archive_contents(target: str, file_bytes: dict[str, bytes]) -> list
     errors: list[str] = []
     arc_names = set(file_bytes.keys())
 
-    # 1. Verify required core paths exist
+    # 1. Verify required core paths exist (+ Antigravity-only vertical-slice isolation)
     for req in sorted(REQUIRED_ARCHIVE_PATHS):
         if req not in arc_names:
             errors.append(f"[{target}] missing required archive path: {req}")
+    if target == "antigravity":
+        for ag_req in (
+            "hooks.json",
+            "rules/AGENTS.md",
+            "agents/coldpin-auditor.md",
+            "skills/coldpin-audit/SKILL.md",
+            "skills/coldpin-incident/SKILL.md",
+            "catalog/plugin.oms.sig",
+        ):
+            if ag_req not in arc_names:
+                errors.append(f"[antigravity] missing required Antigravity plugin path: {ag_req}")
+    else:
+        for ag_only in ("hooks.json", "catalog/plugin.oms.sig", "skills/coldpin-audit/SKILL.md", "skills/coldpin-incident/SKILL.md"):
+            if ag_only in arc_names:
+                errors.append(f"[{target}] Antigravity-only path leaked into non-Antigravity bundle: {ag_only}")
 
     # 2. Verify manifest paths, MCP entrypoints & zero hooks
     for manifest_name in ("plugin.json", ".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
@@ -266,7 +297,9 @@ def build_reproducible_zip(dest_zip: Path, items: list[tuple[str, Path]], target
         for arc_name in sorted(file_bytes.keys()):
             info = zipfile.ZipInfo(filename=arc_name, date_time=FIXED_ZIP_TIME)
             info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o644 << 16
+            info.create_system = 3
+            mode = 0o100755 if arc_name in EXEC_ARCHIVE_PATHS else 0o100644
+            info.external_attr = mode << 16
             zf.writestr(info, file_bytes[arc_name])
     return hashlib.sha256(dest_zip.read_bytes()).hexdigest()
 
