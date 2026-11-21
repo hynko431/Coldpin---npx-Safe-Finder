@@ -147,17 +147,17 @@ export async function runInspect(
   },
 ): Promise<
   | {
-      ok: true;
-      report: PackageInspectionReport;
-      dependencies?: Record<string, string>;
-      exitCode: ExitCode;
-    }
+    ok: true;
+    report: PackageInspectionReport;
+    dependencies?: Record<string, string>;
+    exitCode: ExitCode;
+  }
   | {
-      ok: false;
-      error: string;
-      exitCode: ExitCode;
-      isOperationalError: boolean;
-    }
+    ok: false;
+    error: string;
+    exitCode: ExitCode;
+    isOperationalError: boolean;
+  }
 > {
   // LLM offline flag may only tighten false -> true
   const policy: PolicyConfig =
@@ -780,7 +780,7 @@ export async function runResolveAnchor(
 
   const exitCode: ExitCode =
     decision.recommended_action === "USE_PINNED_LATEST" ||
-    decision.recommended_action === "ROLLBACK_TO_SAFE_ANCHOR"
+      decision.recommended_action === "ROLLBACK_TO_SAFE_ANCHOR"
       ? 0
       : decision.recommended_action === "BLOCK_NO_SAFE_PATH"
         ? 3
@@ -865,10 +865,10 @@ export async function runAuditVerify(
   input: { auditLogPath: string },
 ): Promise<
   | {
-      ok: true;
-      result: { valid: boolean; total_events: number; broken_at_seq?: number; reason?: string };
-      exitCode: ExitCode;
-    }
+    ok: true;
+    result: { valid: boolean; total_events: number; broken_at_seq?: number; reason?: string };
+    exitCode: ExitCode;
+  }
   | { ok: false; error: string; exitCode: ExitCode; isOperationalError: boolean }
 > {
   let targetPath: string;
@@ -1028,12 +1028,10 @@ export async function runAuditManifestBatch(
         reasons.push(`${obs.code}: ${obs.detail}`);
       }
 
-      if (severityRank < 2) {
-        if (routing.route === "public") {
-          publicOsvTargets.push({ name: depName, ...(exactVer ? { version: exactVer } : {}) });
-        } else if (routing.route === "private") {
-          privateOsvTargets.push({ name: depName, ...(exactVer ? { version: exactVer } : {}) });
-        }
+      if (routing.route === "public") {
+        publicOsvTargets.push({ name: depName, ...(exactVer ? { version: exactVer } : {}) });
+      } else if (routing.route === "private") {
+        privateOsvTargets.push({ name: depName, ...(exactVer ? { version: exactVer } : {}) });
       }
     }
 
