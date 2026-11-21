@@ -187,7 +187,8 @@ jobs:
           PKG_VER: ${{ needs.build-and-verify.outputs.pkg_ver }}
         run: |
           set -euo pipefail
-          if npm view "${PKG_NAME}@${PKG_VER}" version >/dev/null 2>&1; then
+          # Use a unique query parameter so existence probes never poison Cloudflare's bare-URL 404 cache.
+          if curl --fail --silent --show-error --output /dev/null "https://registry.npmjs.org/${PKG_NAME}/${PKG_VER}?coldpin_exists=$(date +%s)"; then
             echo "Package ${PKG_NAME}@${PKG_VER} is already published on npm; skipping publish."
           else
             npm publish --access public
@@ -202,6 +203,8 @@ jobs:
       id-token: write
     env:
       MCP_PUBLISHER_VERSION: v1.8.1
+      PKG_NAME: ${{ needs.build-and-verify.outputs.pkg_name }}
+      PKG_VER: ${{ needs.build-and-verify.outputs.pkg_ver }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -228,9 +231,60 @@ jobs:
           tar -xzf "${archive}"
           chmod +x ./mcp-publisher
 
+      - name: Wait for npm registry metadata and tarball propagation
+        run: |
+          set -euo pipefail
+          MCP_NAME="$(jq -r '.name' server.json)"
+          TARBALL_NAME="${PKG_NAME##*/}"
+          ready=0
+          for attempt in $(seq 1 40); do
+            ts="$(date +%s)"
+            meta_url="https://registry.npmjs.org/${PKG_NAME}/${PKG_VER}?coldpin_poll=${attempt}_${ts}"
+            tgz_url="https://registry.npmjs.org/${PKG_NAME}/-/${TARBALL_NAME}-${PKG_VER}.tgz?coldpin_poll=${attempt}_${ts}"
+            if meta_json="$(curl --fail --silent --show-error "$meta_url" 2>/dev/null)" \
+              && printf '%s' "$meta_json" | jq -e --arg m "$MCP_NAME" '.mcpName == $m' >/dev/null 2>&1 \
+              && curl --fail --silent --head --output /dev/null "$tgz_url" 2>/dev/null; then
+              echo "npm origin ready for ${PKG_NAME}@${PKG_VER} (mcpName=${MCP_NAME}) on attempt ${attempt}."
+              ready=1
+              break
+            fi
+            echo "Attempt ${attempt}/40: waiting 15s for npm propagation of ${PKG_NAME}@${PKG_VER}..."
+            sleep 15
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "ERROR: Timed out waiting for ${PKG_NAME}@${PKG_VER} propagation on registry.npmjs.org." >&2
+            exit 1
+          fi
+          # Allow global CDN edge convergence before the MCP Registry queries bare npm URLs.
+          sleep 15
+
       - name: Validate and publish server.json to Official MCP Registry via GitHub OIDC
         run: |
           set -euo pipefail
+          MCP_NAME="$(jq -r '.name' server.json)"
           ./mcp-publisher validate
           ./mcp-publisher login github-oidc
-          ./mcp-publisher publish
+          for attempt in $(seq 1 6); do
+            set +e
+            out="$(./mcp-publisher publish 2>&1)"
+            rc=$?
+            set -e
+            printf '%s\n' "$out"
+            if [ "$rc" -eq 0 ]; then
+              exit 0
+            fi
+            if curl --fail --silent "https://registry.modelcontextprotocol.io/v0.1/servers?search=${MCP_NAME}" \
+              | jq -e --arg n "$MCP_NAME" --arg v "$PKG_VER" '.servers[]? | select(.server.name == $n and .server.version == $v)' >/dev/null 2>&1; then
+              echo "MCP Registry already lists ${MCP_NAME}@${PKG_VER}; treating as idempotent success."
+              exit 0
+            fi
+            if printf '%s' "$out" | grep -Eiq '404|not found|failed to fetch|502|503|504|timeout|timed out|temporarily unavailable|EOF'; then
+              if [ "$attempt" -lt 6 ]; then
+                echo "Transient MCP Registry npm verification error (attempt ${attempt}/6); retrying in 65s..."
+                sleep 65
+                continue
+              fi
+            fi
+            exit "$rc"
+          done
+          exit 1
